@@ -36,15 +36,15 @@ CEvent eventExit(TRUE, FALSE);
 std::wstring empty;
 const wchar_t *Title = L"Potato Browser";
 
-class LinkCommand : public ICommand
+class link_command : public ICommand
 {
 private:
-    CHtmlView &_view;
+    html_view &_view;
     std::wstring _url;
 
 public:
 
-    LinkCommand(CHtmlView &v, const std::wstring &url) : _view(v), _url(url)
+    link_command(html_view &v, const std::wstring &url) : _view(v), _url(url)
     {
     }
 
@@ -71,16 +71,16 @@ public:
     }
 };
 
-class CMainFrame : public CWindowImpl < CMainFrame >
+class main_frame : public CWindowImpl < main_frame >
 {
 public:
 
     //HtmlView _view;
 
-    Toolbar _toolbar;
-    CHtmlView _view;
+    toolbar _toolbar;
+    html_view _view;
 
-    BEGIN_MSG_MAP(CMainFrame)
+    BEGIN_MSG_MAP(main_frame)
         MESSAGE_HANDLER(WM_CREATE, OnCreate)
         MESSAGE_HANDLER(WM_SIZE, OnSize)
         MESSAGE_HANDLER(WM_ACTIVATE, OnActivate)
@@ -90,7 +90,7 @@ public:
         MESSAGE_HANDLER(WM_SOCKET, OnSocket)
     END_MSG_MAP()
 
-    CMainFrame() : _toolbar(_view), _view(_toolbar)
+    main_frame() : _toolbar(_view), _view(_toolbar)
     {
     }
 
@@ -101,7 +101,7 @@ public:
             message != WM_ERASEBKGND;
     }
 
-    bool CMainFrame::PreTranslateMessage(MSG* pMsg)
+    bool main_frame::PreTranslateMessage(MSG* pMsg)
     {
         if (IsPreTranslateMessageMessage(pMsg->message))
         {
@@ -156,9 +156,9 @@ public:
         //auto job = std::make_shared<Load>(_view, m_hWnd, "en.wikipedia.org", "/wiki/World_Wide_Web");
         //_jobs[job->Start()] = job;
 
-        _toolbar.AddCommand(ID_FILE_BBC, std::make_shared<LinkCommand>(_view, L"http://www.bbc.com/"));
-        _toolbar.AddCommand(ID_FILE_WIKIPEDIA, std::make_shared<LinkCommand>(_view, L"http://www.wikipedia.org/"));
-        _toolbar.AddCommand(ID_FILE_GOOGLE, std::make_shared<LinkCommand>(_view, L"http://www.google.com/"));
+        _toolbar.AddCommand(ID_FILE_BBC, std::make_shared<link_command>(_view, L"http://www.bbc.com/"));
+        _toolbar.AddCommand(ID_FILE_WIKIPEDIA, std::make_shared<link_command>(_view, L"http://www.wikipedia.org/"));
+        _toolbar.AddCommand(ID_FILE_GOOGLE, std::make_shared<link_command>(_view, L"http://www.google.com/"));
 
         // IDM_ABOUT
         _toolbar.AddCommand(ID_TEST, std::make_shared<FuncCommand>([&](){ _view.open_text(L"test", RunTests()); }));
@@ -229,7 +229,7 @@ public:
     }
 };
 
-static int Run(CMainFrame &frame)
+static int Run(main_frame &frame)
 {
     MSG msg;
 
@@ -293,7 +293,7 @@ int APIENTRY _tWinMain(_In_ HINSTANCE hInstance,
             ::InitCommonControlsEx(&iccx);
 
             {
-                CMainFrame frame;
+                main_frame frame;
                 frame.Create(nullptr, nullptr, Title, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
 
                 auto icon = LoadIcon(hInstance, MAKEINTRESOURCE(IDC_POTATO));

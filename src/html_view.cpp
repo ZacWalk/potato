@@ -5,7 +5,7 @@
 
 
 
-CHtmlView::CHtmlView(Toolbar &tb) : _toolbar(tb)
+html_view::html_view(toolbar &tb) : _toolbar(tb)
 {
     m_top = 0;
     m_left = 0;
@@ -15,12 +15,12 @@ CHtmlView::CHtmlView(Toolbar &tb) : _toolbar(tb)
     m_http.open(L"potato/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS);
 }
 
-CHtmlView::~CHtmlView(void)
+html_view::~html_view(void)
 {
     m_http.close();
 }
 
-void CHtmlView::OnPaint(HDC hdc, LPRECT rcDraw)
+void html_view::OnPaint(HDC hdc, LPRECT rcDraw)
 {
     auto page = m_page;
 
@@ -33,7 +33,7 @@ void CHtmlView::OnPaint(HDC hdc, LPRECT rcDraw)
     }
 }
 
-void CHtmlView::OnSize(int width, int height)
+void html_view::OnSize(int width, int height)
 {
     auto page = m_page;
 
@@ -45,26 +45,26 @@ void CHtmlView::OnSize(int width, int height)
     }
 }
 
-void CHtmlView::open(const std::wstring &url)
+void html_view::open(const std::wstring &url)
 {
     auto pThis = this;
     m_http.download_file(url, std::make_shared<http_request>([pThis, url](const std::wstring &file_name) { pThis->open_file(url, file_name); }));
     SetFocus();
 }
 
-void CHtmlView::open_file(const std::wstring &url, const std::wstring &file_name)
+void html_view::open_file(const std::wstring &url, const std::wstring &file_name)
 {
     open_text(url, get_file_contents(file_name));
     SetFocus();
 }
 
 
-void CHtmlView::open_text(const std::wstring &url, const std::string &text)
+void html_view::open_text(const std::wstring &url, const std::string &text)
 {
     open_text(url, ToUtf16(text));
 }
 
-void CHtmlView::open_text(const std::wstring &url, const std::wstring &text)
+void html_view::open_text(const std::wstring &url, const std::wstring &text)
 {
     if (m_page)
     {
@@ -87,7 +87,7 @@ void CHtmlView::open_text(const std::wstring &url, const std::wstring &text)
     Invalidate();
 }
 
-void CHtmlView::layout()
+void html_view::layout()
 {
     if (m_hWnd)
     {
@@ -118,7 +118,7 @@ void CHtmlView::layout()
     }
 }
 
-void CHtmlView::update_scroll()
+void html_view::update_scroll()
 {
     if (!m_page)
     {
@@ -169,7 +169,7 @@ void CHtmlView::update_scroll()
     }
 }
 
-void CHtmlView::OnVScroll(int pos, int flags)
+void html_view::OnVScroll(int pos, int flags)
 {
     RECT rcClient;
     GetClientRect(&rcClient);
@@ -226,7 +226,7 @@ void CHtmlView::OnVScroll(int pos, int flags)
     scroll_to(m_left, newTop);
 }
 
-void CHtmlView::OnHScroll(int pos, int flags)
+void html_view::OnHScroll(int pos, int flags)
 {
     RECT rcClient;
     GetClientRect(&rcClient);
@@ -283,7 +283,7 @@ void CHtmlView::OnHScroll(int pos, int flags)
     scroll_to(newLeft, m_top);
 }
 
-void CHtmlView::OnMouseWheel(int delta)
+void html_view::OnMouseWheel(int delta)
 {
     int lineHeight = 16;
 
@@ -304,7 +304,7 @@ void CHtmlView::OnMouseWheel(int delta)
     }
 }
 
-void CHtmlView::OnKeyDown(UINT vKey)
+void html_view::OnKeyDown(UINT vKey)
 {
     switch (vKey)
     {
@@ -314,7 +314,7 @@ void CHtmlView::OnKeyDown(UINT vKey)
     }
 }
 
-void CHtmlView::refresh()
+void html_view::refresh()
 {
     auto page = m_page;
 
@@ -324,7 +324,7 @@ void CHtmlView::refresh()
     }
 }
 
-void CHtmlView::set_caption()
+void html_view::set_caption()
 {
     auto page = m_page;
 
@@ -338,7 +338,7 @@ void CHtmlView::set_caption()
     }
 }
 
-void CHtmlView::OnMouseMove(int x, int y)
+void html_view::OnMouseMove(int x, int y)
 {
     auto page = m_page;
 
@@ -367,7 +367,7 @@ void CHtmlView::OnMouseMove(int x, int y)
     }
 }
 
-void CHtmlView::OnMouseLeave()
+void html_view::OnMouseLeave()
 {
     auto page = m_page;
 
@@ -396,7 +396,7 @@ void CHtmlView::OnMouseLeave()
     }
 }
 
-void CHtmlView::OnLButtonDown(int x, int y)
+void html_view::OnLButtonDown(int x, int y)
 {
     SetFocus();
 
@@ -426,7 +426,7 @@ void CHtmlView::OnLButtonDown(int x, int y)
     }
 }
 
-void CHtmlView::OnLButtonUp(int x, int y)
+void html_view::OnLButtonUp(int x, int y)
 {
     auto page = m_page;
 
@@ -454,7 +454,7 @@ void CHtmlView::OnLButtonUp(int x, int y)
     }
 }
 
-void CHtmlView::back()
+void html_view::back()
 {
     std::wstring url;
     if (m_history.back(url))
@@ -463,7 +463,7 @@ void CHtmlView::back()
     }
 }
 
-void CHtmlView::forward()
+void html_view::forward()
 {
     std::wstring url;
     if (m_history.forward(url))
@@ -472,7 +472,7 @@ void CHtmlView::forward()
     }
 }
 
-void CHtmlView::update_cursor()
+void html_view::update_cursor()
 {
     //LPCWSTR defArrow = m_page_next ? IDC_APPSTARTING : IDC_ARROW;
     LPCWSTR defArrow = IDC_ARROW;
@@ -496,7 +496,7 @@ void CHtmlView::update_cursor()
     }
 }
 
-position CHtmlView::client_pos()
+position html_view::client_pos()
 {
     RECT rcClient;
     GetClientRect(&rcClient);
@@ -510,7 +510,7 @@ position CHtmlView::client_pos()
     return client;
 }
 
-void CHtmlView::update_history()
+void html_view::update_history()
 {
     auto page = m_page;
 
@@ -520,7 +520,7 @@ void CHtmlView::update_history()
     }
 }
 
-void CHtmlView::scroll_to(int new_left, int new_top)
+void html_view::scroll_to(int new_left, int new_top)
 {
     auto client = client_pos();
 

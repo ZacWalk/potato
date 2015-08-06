@@ -6,7 +6,7 @@
 #include "element.h"
 
 class render_win32;
-class CHtmlView;
+class html_view;
 class element;
 
 
@@ -28,7 +28,7 @@ class document : public std::enable_shared_from_this < document >
 {
 private:
 
-    CHtmlView &_view;
+    html_view &_view;
 
     element *m_root;
     std::map<std::wstring, font_item, ltstr> m_fonts;
@@ -50,7 +50,7 @@ private:
     std::map<std::wstring, std::shared_ptr<Gdiplus::Bitmap>, ltstr> m_images;
 
 public:
-    document(CHtmlView &view);
+    document(html_view &view);
     ~document();
 
     void clear();
@@ -113,10 +113,10 @@ public:
     void set_root(element *r);
     void add_stylesheet(const std::wstring &text, const std::wstring &baseurl, const std::wstring &media);
 
-    static std::shared_ptr<document> createFromUTF16(CHtmlView &view, const std::wstring &url, const std::wstring &str);
-    static std::shared_ptr<document> createFromUTF8(CHtmlView &view, const std::wstring &url, const std::string &str);
+    static std::shared_ptr<document> createFromUTF16(html_view &view, const std::wstring &url, const std::wstring &str);
+    static std::shared_ptr<document> createFromUTF8(html_view &view, const std::wstring &url, const std::string &str);
 
-    friend class CHtmlView;
+    friend class html_view;
 
 private:
 

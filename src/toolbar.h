@@ -644,14 +644,14 @@ class AddressComplete : public std::enable_shared_from_this < AddressComplete >
 {
     AutoCompleteResults _results;
     std::map<std::wstring, int> _urls;
-    CHtmlView &_view;
+    html_view &_view;
 
 public:
 
     static const bool AutoSelect = false;
     static const bool ResizeToShowResults = true;
 
-    AddressComplete(CHtmlView &v) : _view(v)
+    AddressComplete(html_view &v) : _view(v)
     {
     }
 
@@ -978,13 +978,13 @@ public:
 };
 
 
-class Toolbar :
-    public CWindowImpl < Toolbar >
+class toolbar :
+    public CWindowImpl < toolbar >
 {
 
 private:
 
-    CHtmlView &_view;
+    html_view &_view;
 
     std::vector<int> _commandIds;
 
@@ -1023,12 +1023,12 @@ public:
 
     static const int topControlsHeight = 50;
 
-    Toolbar(CHtmlView &v) : _view(v), _hAccel(nullptr), _showingMenu(0), _addressHasFocus(false), _enablePopupItems(true), _completes(std::make_shared<AddressComplete>(v)), _popup(_address, _completes)
+    toolbar(html_view &v) : _view(v), _hAccel(nullptr), _showingMenu(0), _addressHasFocus(false), _enablePopupItems(true), _completes(std::make_shared<AddressComplete>(v)), _popup(_address, _completes)
     {
         _alwaysEnable.insert(ID_VIEW_MENU);
     }
 
-    ~Toolbar()
+    ~toolbar()
     {
         ATLTRACE("Destroy Toolbar\n");
     }
@@ -1393,7 +1393,7 @@ public:
         return 0;
     }
 
-    BEGIN_MSG_MAP(Toolbar)
+    BEGIN_MSG_MAP(toolbar)
 
         MESSAGE_HANDLER(WM_CREATE, OnCreate)
         MESSAGE_HANDLER(WM_SIZE, OnSize)

@@ -4,15 +4,15 @@
 #include "render_win32.h"
 #include "util.h"
 
-class Toolbar;
+class toolbar;
 
-class CHtmlView : public CWindowImpl < CHtmlView >
+class html_view : public CWindowImpl < html_view >
 {
-    typedef CHtmlView thisClass;
+    typedef html_view thisClass;
 
 private:
 
-    Toolbar &_toolbar;
+    toolbar &_toolbar;
 
     int m_top;
     int m_left;
@@ -24,8 +24,8 @@ private:
 
 public:
 
-    CHtmlView(Toolbar &tb);
-    ~CHtmlView(void);
+    html_view(toolbar &tb);
+    ~html_view(void);
 
     void open(const std::wstring &url);
     void open_file(const std::wstring &url, const std::wstring &filename);

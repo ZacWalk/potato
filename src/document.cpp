@@ -10,7 +10,7 @@
 #include "ui.h"
 
 
-document::document(CHtmlView &v) : _view(v), m_root(nullptr), m_over_element(nullptr)
+document::document(html_view &v) : _view(v), m_root(nullptr), m_over_element(nullptr)
 {
     m_http.open(L"potato/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS);
 }
@@ -49,7 +49,7 @@ void document::load_master_stylesheet(const std::wstring &text)
 }
 
 template<class tstream>
-static std::shared_ptr<document> createFromStream(CHtmlView &view, const std::wstring &url, tstream& str)
+static std::shared_ptr<document> createFromStream(html_view &view, const std::wstring &url, tstream& str)
 {
     auto doc = std::make_shared<document>(view);
 
@@ -121,13 +121,13 @@ void document::set_root(element *r)
     apply_stylesheet();
 }
 
-std::shared_ptr<document> document::createFromUTF16(CHtmlView &view, const std::wstring &url, const std::wstring &str)
+std::shared_ptr<document> document::createFromUTF16(html_view &view, const std::wstring &url, const std::wstring &str)
 {
     utf16_instream si(str);
     return createFromStream(view, url, si);
 }
 
-std::shared_ptr<document> document::createFromUTF8(CHtmlView &view, const std::wstring &url, const std::string &str)
+std::shared_ptr<document> document::createFromUTF8(html_view &view, const std::wstring &url, const std::string &str)
 {
     utf8_instream si(str);
     return createFromStream(view, url, si);
