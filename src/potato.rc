@@ -1,0 +1,172 @@
+// Microsoft Visual C++ generated resource script.
+//
+#include "resource.h"
+
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#ifndef APSTUDIO_INVOKED
+#include "targetver.h"
+#endif
+#define APSTUDIO_HIDDEN_SYMBOLS
+#include "windows.h"
+#undef APSTUDIO_HIDDEN_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+// English (United States) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+#pragma code_page(1252)
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Icon
+//
+
+// Icon with lowest ID value placed first to ensure application icon
+// remains consistent on all systems.
+IDI_POTATO              ICON                    "res/potato.ico"
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Menu
+//
+
+IDC_POTATO MENU
+BEGIN
+    POPUP "Menu"
+    BEGIN
+        MENUITEM "BBC",                         ID_FILE_BBC
+        MENUITEM "Wikipedia",                   ID_FILE_WIKIPEDIA
+        MENUITEM "Google",                      ID_FILE_GOOGLE
+        MENUITEM SEPARATOR
+        MENUITEM "Test",                        ID_TEST
+        MENUITEM "About",                       IDM_ABOUT
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",                       IDM_EXIT
+    END
+    POPUP "Browse"
+    BEGIN
+        MENUITEM "Back",                        ID_BROWSE_BACK
+        MENUITEM "Next",                        ID_BROWSE_NEXT
+        MENUITEM "Refresh",                     ID_BROWSE_REFRESH
+        MENUITEM "Home",                        ID_BROWSE_HOME
+        MENUITEM "Stop",                        ID_BROWSE_STOP
+    END
+    POPUP "View"
+    BEGIN
+        MENUITEM "Menu",                        ID_VIEW_MENU
+    END
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Accelerator
+//
+
+IDC_POTATO ACCELERATORS
+BEGIN
+    "T",            ID_TEST,                VIRTKEY, CONTROL, NOINVERT
+    "/",            IDM_ABOUT,              ASCII,  ALT, NOINVERT
+    "?",            IDM_ABOUT,              ASCII,  ALT, NOINVERT
+    VK_RETURN,      ID_TEST,                VIRTKEY, NOINVERT
+    "T",            ID_ACCELERATOR32786,    VIRTKEY, CONTROL, NOINVERT
+END
+
+
+#ifdef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// TEXTINCLUDE
+//
+
+1 TEXTINCLUDE 
+BEGIN
+    "resource.h\0"
+END
+
+2 TEXTINCLUDE 
+BEGIN
+    "#ifndef APSTUDIO_INVOKED\r\n"
+    "#include ""targetver.h""\r\n"
+    "#endif\r\n"
+    "#define APSTUDIO_HIDDEN_SYMBOLS\r\n"
+    "#include ""windows.h""\r\n"
+    "#undef APSTUDIO_HIDDEN_SYMBOLS\r\n"
+    "\0"
+END
+
+3 TEXTINCLUDE 
+BEGIN
+    "\r\n"
+    "\0"
+END
+
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// String Table
+//
+
+STRINGTABLE
+BEGIN
+    IDS_APP_TITLE           "Potato"
+    IDC_POTATO              "POTATO"
+END
+
+#endif    // English (United States) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////////////////////////
+// English (United Kingdom) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENG)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
+#pragma code_page(1252)
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// HTML
+//
+
+IDR_HTML_TEST           HTML                    "res/test.htm"
+IDR_CSS_MASTER          HTML                    "res/master.css"
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// PNG
+//
+
+IDB_ARROW_DOWN          PNG                     "res\\arrow_down.png"
+IDB_ARROW_LEFT          PNG                     "res\\arrow_left.png"
+IDB_ARROW_RIGHT         PNG                     "res\\arrow_right.png"
+IDB_ARROW_UP            PNG                     "res\\arrow_up.png"
+IDB_MENU                PNG                     "res\\menu.png"
+IDB_REFRESH             PNG                     "res\\refres.png"
+IDB_SETTINGS            PNG                     "res\\settings.png"
+IDB_STOP                PNG                     "res\\stop.png"
+#endif    // English (United Kingdom) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+
+/////////////////////////////////////////////////////////////////////////////
+#endif    // not APSTUDIO_INVOKED
+

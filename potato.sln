@@ -1,0 +1,27 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio 2013
+VisualStudioVersion = 12.0.31101.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "potato", "src\potato.vcxproj", "{BF27222B-0D2C-4BF5-90BE-1C62B2F5A364}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{796C7782-4A12-441F-BD92-0C21E3A00882}"
+	ProjectSection(SolutionItems) = preProject
+		Performance1.psess = Performance1.psess
+	EndProjectSection
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Win32 = Debug|Win32
+		Release|Win32 = Release|Win32
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{BF27222B-0D2C-4BF5-90BE-1C62B2F5A364}.Debug|Win32.ActiveCfg = Debug|Win32
+		{BF27222B-0D2C-4BF5-90BE-1C62B2F5A364}.Debug|Win32.Build.0 = Debug|Win32
+		{BF27222B-0D2C-4BF5-90BE-1C62B2F5A364}.Release|Win32.ActiveCfg = Release|Win32
+		{BF27222B-0D2C-4BF5-90BE-1C62B2F5A364}.Release|Win32.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
