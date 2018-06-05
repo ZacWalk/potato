@@ -182,3 +182,7 @@ UpgradeLog*.htm
 # Microsoft Fakes
 FakesAssemblies/
 /exe/potato.exe
+*.opendb
+/.vs/*
+/exe/potato.iobj
+*.ipdb
