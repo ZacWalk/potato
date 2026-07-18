@@ -3,6 +3,7 @@
 // specificity, and the css stylesheet container.
 
 #pragma once
+#include "platform.h"
 #include "core.h"
 
 
@@ -69,7 +70,7 @@ public:
 class background_paint
 {
 public:
-	std::shared_ptr<Gdiplus::Bitmap> image;
+	pf::bitmap_ptr image;
 	background_attachment attachment = background_attachment_scroll;
 	background_repeat repeat = background_repeat_repeat;
 	web_color color{0, 0, 0, 0};
@@ -100,25 +101,18 @@ class render_win32
 {
 protected:
 	position::vector m_clips;
-	HRGN m_hClipRgn;
-	HDC _hdc;
+	pf::draw_context* _ctx;
 	position _client_pos;
 
 public:
-	render_win32(const HDC hdc, const position& client_pos) : m_hClipRgn(nullptr), _hdc(hdc), _client_pos(client_pos)
+	render_win32(pf::draw_context& ctx, const position& client_pos) : _ctx(&ctx), _client_pos(client_pos)
 	{
 	}
 
-	~render_win32()
-	{
-		if (m_hClipRgn)
-		{
-			DeleteObject(m_hClipRgn);
-		}
-	}
+	~render_win32() = default;
 
-	void draw_image(const std::shared_ptr<Gdiplus::Bitmap>& bm, const position& pos);
-	size get_image_size(const std::shared_ptr<Gdiplus::Bitmap>& bm);
+	void draw_image(const pf::bitmap_ptr& bm, const position& pos);
+	size get_image_size(const pf::bitmap_ptr& bm);
 
 	void apply_clip();
 	void del_clip();
@@ -127,13 +121,13 @@ public:
 	void draw_borders(const css_borders& borders, const position& draw_pos, bool root);
 	void draw_ellipse(int x, int y, int width, int height, const web_color& color, int line_width);
 	void draw_list_marker(const list_marker& marker);
-	void draw_text(const char* text, HFONT hFont, const web_color& color, const position& pos);
+	void draw_text(const char* text, pf::font_handle hFont, const web_color& color, const position& pos);
 	void fill_ellipse(int x, int y, int width, int height, const web_color& color);
 	void fill_rect(const position& pos, const web_color& color, const css_border_radius& radius);
 	void fill_rect(int x, int y, int width, int height, const web_color& color, const css_border_radius& radius);
 	void release_clip();
 	void set_clip(const position& pos, bool valid_x, bool valid_y);
-	int line_height(HFONT hFont);
+	int line_height(pf::font_handle hFont);
 };
 
 
@@ -303,6 +297,7 @@ enum css_combinator
 struct selector_key
 {
 	enum kind_t { bucket_id, bucket_class, bucket_tag, bucket_universal };
+
 	kind_t kind = bucket_universal;
 	// For bucket_class, this is a space-separated list of ALL classes the selector
 	// requires; the selector is registered under each. For bucket_id/bucket_tag,
@@ -427,16 +422,19 @@ public:
 		const auto it = m_by_id.find(id);
 		return it == m_by_id.end() ? nullptr : &it->second;
 	}
+
 	const selector_list* selectors_by_class(const std::string& cls) const
 	{
 		const auto it = m_by_class.find(cls);
 		return it == m_by_class.end() ? nullptr : &it->second;
 	}
+
 	const selector_list* selectors_by_tag(const std::string& tag) const
 	{
 		const auto it = m_by_tag.find(tag);
 		return it == m_by_tag.end() ? nullptr : &it->second;
 	}
+
 	const selector_list& universal_selectors() const { return m_universal; }
 
 	void clear()

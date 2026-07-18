@@ -1,22 +1,13 @@
-// pch.h - Precompiled header. Includes Windows SDK, GDI+, WinHTTP, STL headers,
-// and the core types header shared by all translation units.
+// pch.h - Precompiled header. Includes the platform abstraction header and
+// STL headers. Intentionally does NOT include any Windows SDK headers
+// (windows.h, windowsx.h, commctrl.h, shlwapi.h, strsafe.h, winhttp.h);
+// those live only in src/platform_win.cpp. Files that still depend on Win32
+// types include the relevant header(s) themselves.
 
 #pragma once
 
 #include "targetver.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#define ISOLATION_AWARE_ENABLED 1
-#define GDIPVER 0x0110
-
-#include <windows.h>
-#include <windowsx.h>
-#include <commctrl.h>
-#include <shlwapi.h>
-#include <strsafe.h>
-#include <winhttp.h>
-#include <gdiplus.h>
 
 #include <algorithm>
 #include <cassert>
@@ -35,4 +26,5 @@
 #include <unordered_map>
 #include <vector>
 
+#include "platform.h"
 #include "core.h"

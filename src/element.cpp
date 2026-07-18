@@ -7,7 +7,7 @@
 
 
 element::element(document& doc, const enum element_type t, std::string text) : m_type(t), m_doc(doc),
-	m_text(std::move(text))
+                                                                               m_text(std::move(text))
 {
 	m_box = nullptr;
 	m_parent = nullptr;
@@ -23,7 +23,7 @@ element::element(document& doc, const enum element_type t, std::string text) : m
 	m_list_style_position = list_style_position_outside;
 	m_float = float_none;
 	m_clear = clear_none;
-	m_font = nullptr;
+	m_font = 0;
 	m_font_size = 0;
 	m_white_space = white_space_normal;
 	m_lh_predefined = false;
@@ -347,7 +347,8 @@ const std::string element::get_attr(const std::string& name, const std::string& 
 
 void element::apply_stylesheet(const css& styles)
 {
-	if (m_type == el_before || m_type == el_after || m_type == el_text || m_type == el_space || m_type == el_style || m_type
+	if (m_type == el_before || m_type == el_after || m_type == el_text || m_type == el_space || m_type == el_style ||
+		m_type
 		== el_script || m_type == el_svg)
 	{
 		return;
@@ -387,7 +388,7 @@ void element::apply_stylesheet(const css& styles)
 		// Selector side was lowercased via trim_lower during selector parse; the
 		// id attribute is raw, so lowercase here to match the old case-insensitive behavior.
 		std::string id_lower = m_id;
-		for (auto& ch : id_lower) ch = static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
+		for (auto& ch : id_lower) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
 		add_list(styles.selectors_by_id(id_lower));
 	}
 	if (!m_class.empty())
@@ -399,7 +400,7 @@ void element::apply_stylesheet(const css& styles)
 		{
 			trim(c);
 			if (c.empty()) continue;
-			for (auto& ch : c) ch = static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
+			for (auto& ch : c) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
 			add_list(styles.selectors_by_class(c));
 		}
 	}
@@ -572,7 +573,7 @@ void element::draw(render_win32& renderer, const int x, const int y, const posit
 	}
 }
 
-HFONT element::get_font(font_metrics* fm)
+pf::font_handle element::get_font(font_metrics* fm)
 {
 	if (m_type == el_text || m_type == el_space)
 	{
@@ -587,7 +588,7 @@ HFONT element::get_font(font_metrics* fm)
 }
 
 const std::string element::get_style_property(const std::string& name, const bool inherited,
-                                               const std::string& def) const
+                                              const std::string& def) const
 {
 	if (m_type == el_text || m_type == el_space)
 	{
@@ -629,6 +630,7 @@ const std::string element::get_style_property(const std::string& name, const boo
 	auto var_pos = result.find("var(");
 	int var_depth = 0;
 	constexpr int max_var_depth = 32;
+	std::set<std::string> seen_vars;
 
 	while (var_pos != std::string::npos && var_depth < max_var_depth)
 	{
@@ -661,7 +663,12 @@ const std::string element::get_style_property(const std::string& name, const boo
 
 		if (!var_name.empty() && var_name.size() > 2 && var_name[0] == '-' && var_name[1] == '-')
 		{
-			resolved = resolve_custom_property(var_name);
+			// Detect cycles: if we have already resolved this name, fall through
+			// to the fallback to avoid infinite expansion (e.g. --a: var(--a)).
+			if (!seen_vars.insert(var_name).second)
+				resolved.clear();
+			else
+				resolved = resolve_custom_property(var_name);
 		}
 
 		if (resolved.empty())
@@ -804,9 +811,9 @@ void element::parse_styles(const bool is_reparse)
 	// Parse flex item properties
 	{
 		const auto fg = get_style_property("flex-grow", false, "0");
-		m_flex_grow = static_cast<float>(safe_stof(fg));
+		m_flex_grow = safe_stof(fg);
 		const auto fs = get_style_property("flex-shrink", false, "1");
-		m_flex_shrink = static_cast<float>(safe_stof(fs));
+		m_flex_shrink = safe_stof(fs);
 		m_flex_basis.fromString(get_style_property("flex-basis", false, "auto"), "auto");
 		m_doc.cvt_units(m_flex_basis, m_font_size);
 		m_flex_align_self = static_cast<flex_align_items>(value_index(
@@ -1590,7 +1597,8 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		calc_outlines(parent_width);
 
 		const bool is_row = (m_flex_direction == flex_direction_row || m_flex_direction == flex_direction_row_reverse);
-		const bool is_reverse = (m_flex_direction == flex_direction_row_reverse || m_flex_direction == flex_direction_column_reverse);
+		const bool is_reverse = (m_flex_direction == flex_direction_row_reverse || m_flex_direction ==
+			flex_direction_column_reverse);
 
 		// Collect flex items (visible children that are in normal flow)
 		struct flex_item
@@ -1638,8 +1646,9 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 			{
 				// Render to measure intrinsic size
 				int rendered = child->render(renderer, 0, 0, is_row ? max_width : max_width);
-				fi.base_size = is_row ? child->width() + child->content_margins_left() + child->content_margins_right()
-				                      : child->height() + child->content_margins_top() + child->content_margins_bottom();
+				fi.base_size = is_row
+					               ? child->width() + child->content_margins_left() + child->content_margins_right()
+					               : child->height() + child->content_margins_top() + child->content_margins_bottom();
 			}
 
 			fi.final_main = fi.base_size;
@@ -1735,7 +1744,8 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 				{
 					for (int i = line.start; i < line.end; i++)
 					{
-						int shrink_amount = static_cast<int>(static_cast<float>(-free_space) * items[i].shrink / total_shrink);
+						int shrink_amount = static_cast<int>(static_cast<float>(-free_space) * items[i].shrink /
+							total_shrink);
 						items[i].final_main = std::max(0, items[i].base_size - shrink_amount);
 					}
 				}
@@ -1747,11 +1757,13 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		{
 			if (is_row)
 			{
-				int item_content_width = item.final_main - item.el->content_margins_left() - item.el->content_margins_right();
+				int item_content_width = item.final_main - item.el->content_margins_left() - item.el->
+					content_margins_right();
 				if (item_content_width < 0) item_content_width = 0;
 				item.el->render(renderer, 0, 0, item_content_width);
 				item.el->m_pos.width = item_content_width;
-				item.cross_size = item.el->height() + item.el->content_margins_top() + item.el->content_margins_bottom();
+				item.cross_size = item.el->height() + item.el->content_margins_top() + item.el->
+					content_margins_bottom();
 			}
 			else
 			{
@@ -1854,7 +1866,8 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 				case flex_align_items_stretch:
 					if (is_row && item.el->m_css_height.is_predefined())
 					{
-						int stretch_h = line.max_cross - item.el->content_margins_top() - item.el->content_margins_bottom();
+						int stretch_h = line.max_cross - item.el->content_margins_top() - item.el->
+							content_margins_bottom();
 						if (stretch_h > item.el->m_pos.height)
 							item.el->m_pos.height = stretch_h;
 					}
@@ -4493,13 +4506,15 @@ int element::new_box(const element* el, const int max_width)
 		font_metrics fm;
 		get_font(&fm);
 
-		m_boxes.push_back(std::make_unique<box>(box_line, line_top, line_left + first_line_margin + text_indent, line_right,
-		                          line_height(), fm, m_text_align));
+		m_boxes.push_back(std::make_unique<box>(box_line, line_top, line_left + first_line_margin + text_indent,
+		                                        line_right,
+		                                        line_height(), fm, m_text_align));
 	}
 	else
 	{
-		m_boxes.push_back(std::make_unique<box>(box_block, line_top, line_left, line_right, line_height(), m_font_metrics,
-		                          m_text_align));
+		m_boxes.push_back(std::make_unique<box>(box_block, line_top, line_left, line_right, line_height(),
+		                                        m_font_metrics,
+		                                        m_text_align));
 	}
 
 	return line_top;
@@ -6756,8 +6771,7 @@ void table_grid::add_cell(element* el)
 
 void table_grid::begin_row(element* row)
 {
-	const std::vector<table_cell> r;
-	m_cells.push_back(r);
+	m_cells.emplace_back();
 
 	m_rows.push_back(table_row(0, row));
 }

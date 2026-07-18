@@ -33,53 +33,6 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 // remains consistent on all systems.
 IDI_POTATO              ICON                    "res/potato.ico"
 
-/////////////////////////////////////////////////////////////////////////////
-//
-// Menu
-//
-
-IDC_POTATO MENU
-BEGIN
-    POPUP "Menu"
-    BEGIN
-        MENUITEM "BBC",                         ID_FILE_BBC
-        MENUITEM "Wikipedia",                   ID_FILE_WIKIPEDIA
-        MENUITEM "Google",                      ID_FILE_GOOGLE
-        MENUITEM SEPARATOR
-        MENUITEM "Test",                        ID_TEST
-        MENUITEM "About",                       IDM_ABOUT
-        MENUITEM SEPARATOR
-        MENUITEM "E&xit",                       IDM_EXIT
-    END
-    POPUP "Browse"
-    BEGIN
-        MENUITEM "Back",                        ID_BROWSE_BACK
-        MENUITEM "Next",                        ID_BROWSE_NEXT
-        MENUITEM "Refresh",                     ID_BROWSE_REFRESH
-        MENUITEM "Home",                        ID_BROWSE_HOME
-        MENUITEM "Stop",                        ID_BROWSE_STOP
-    END
-    POPUP "View"
-    BEGIN
-        MENUITEM "Menu",                        ID_VIEW_MENU
-    END
-END
-
-
-/////////////////////////////////////////////////////////////////////////////
-//
-// Accelerator
-//
-
-IDC_POTATO ACCELERATORS
-BEGIN
-    "T",            ID_TEST,                VIRTKEY, CONTROL, NOINVERT
-    "/",            IDM_ABOUT,              ASCII,  ALT, NOINVERT
-    "?",            IDM_ABOUT,              ASCII,  ALT, NOINVERT
-    VK_RETURN,      ID_TEST,                VIRTKEY, NOINVERT
-    "T",            ID_ACCELERATOR32786,    VIRTKEY, CONTROL, NOINVERT
-END
-
 
 #ifdef APSTUDIO_INVOKED
 /////////////////////////////////////////////////////////////////////////////
@@ -112,17 +65,6 @@ END
 #endif    // APSTUDIO_INVOKED
 
 
-/////////////////////////////////////////////////////////////////////////////
-//
-// String Table
-//
-
-STRINGTABLE
-BEGIN
-    IDS_APP_TITLE           "Potato"
-    IDC_POTATO              "POTATO"
-END
-
 #endif    // English (United States) resources
 /////////////////////////////////////////////////////////////////////////////
 
@@ -142,19 +84,6 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
 IDR_HTML_TEST           HTML                    "res/test.htm"
 IDR_CSS_MASTER          HTML                    "res/master.css"
 
-/////////////////////////////////////////////////////////////////////////////
-//
-// PNG
-//
-
-IDB_ARROW_DOWN          PNG                     "res\\arrow_down.png"
-IDB_ARROW_LEFT          PNG                     "res\\arrow_left.png"
-IDB_ARROW_RIGHT         PNG                     "res\\arrow_right.png"
-IDB_ARROW_UP            PNG                     "res\\arrow_up.png"
-IDB_MENU                PNG                     "res\\menu.png"
-IDB_REFRESH             PNG                     "res\\refres.png"
-IDB_SETTINGS            PNG                     "res\\settings.png"
-IDB_STOP                PNG                     "res\\stop.png"
 #endif    // English (United Kingdom) resources
 /////////////////////////////////////////////////////////////////////////////
 

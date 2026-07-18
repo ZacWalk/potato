@@ -3,7 +3,7 @@
 // autocomplete text_match rendering.
 
 #include "pch.h"
-#include "ui.h"
+// ui.h removed: color constants and helpers (lighten/emphasize/get_*) live in core.h.
 
 
 std::string empty;
@@ -47,96 +47,69 @@ char normalize(const char c)
 }
 
 
-void text_match::draw(const HDC hdc, const recti& rr) const
+void text_match::draw(pf::draw_context& dc, const recti& rr, const pf::font_handle font) const
 {
 	auto r = rr;
+
+	const auto unpack = [](const unsigned c)
+	{
+		return pf::color_t(static_cast<uint8_t>(c & 0xff),
+		                   static_cast<uint8_t>((c >> 8) & 0xff),
+		                   static_cast<uint8_t>((c >> 16) & 0xff));
+	};
 
 	constexpr auto normalText = color::text;
 	const auto highlightBk = lighten(color::task_background, 64);
 	const auto propertyText = emphasize(normalText);
 
-	const auto clrOld = SetTextColor(hdc, normalText);
-
 	if (!_prefix.empty())
 	{
-		const auto wpfx = to_utf16(_prefix);
-		size_i size;
-
-		if (GetTextExtentPointW(hdc, wpfx.c_str(), static_cast<int>(wpfx.size()), &size))
-		{
-			const auto y = r.top + (r.height() - size.cy) / 2;
-
-			SetTextColor(hdc, propertyText);
-			ExtTextOutW(hdc, r.left, y, 0, nullptr, wpfx.c_str(), static_cast<UINT>(wpfx.size()), nullptr);
-			r.left += size.cx + 2;
-			ExtTextOutW(hdc, r.left, y, 0, nullptr, L":", 1, nullptr);
-			r.left += 8;
-			SetTextColor(hdc, normalText);
-		}
+		const auto sz = dc.measure_text_h(_prefix, font);
+		const auto y = r.top + (r.height() - sz.cy) / 2;
+		dc.draw_text_h(r.left, y, _prefix, font, unpack(propertyText));
+		r.left += sz.cx + 2;
+		dc.draw_text_h(r.left, y, ":", font, unpack(propertyText));
+		r.left += 8;
 	}
-
-	const auto wtext = to_utf16(_text);
 
 	if (_selection.empty())
 	{
-		size_i size;
-
-		if (GetTextExtentPointW(hdc, wtext.c_str(), static_cast<int>(wtext.size()), &size))
-		{
-			ExtTextOutW(hdc, r.left, r.top + (r.height() - size.cy) / 2, 0, nullptr, wtext.c_str(),
-			           static_cast<UINT>(wtext.size()),
-			           nullptr);
-		}
+		const auto sz = dc.measure_text_h(_text, font);
+		dc.draw_text_h(r.left, r.top + (r.height() - sz.cy) / 2, _text, font, unpack(normalText));
 	}
 	else
 	{
-		const auto lenLeft = static_cast<int>(_selection.begin);
-		const auto lenMid = static_cast<int>(_selection.end - _selection.begin);
-		const auto lenRight = static_cast<int>(wtext.size() - _selection.end);
+		const auto begin = _selection.begin;
+		const auto end = _selection.end;
+		const auto text_left = std::string_view(_text).substr(0, begin);
+		const auto text_mid = std::string_view(_text).substr(begin, end - begin);
+		const auto text_right = std::string_view(_text).substr(end);
 
-		const auto textLeft = wtext.c_str();
-		const auto textMid = wtext.c_str() + _selection.begin;
-		const auto textRight = wtext.c_str() + _selection.end;
+		const auto extent_left = dc.measure_text_h(text_left, font);
+		const auto extent_mid = dc.measure_text_h(text_mid, font);
+		const auto extent_right = dc.measure_text_h(text_right, font);
 
-		size_i extentLeft;
-		size_i extentMid;
-		size_i extentRight;
+		const auto h = Max(extent_left.cy, extent_mid.cy, extent_right.cy);
+		const auto y = r.top + (r.height() - h) / 2;
 
-		GetTextExtentPointW(hdc, textLeft, lenLeft, &extentLeft);
-		GetTextExtentPointW(hdc, textMid, lenMid, &extentMid);
-		GetTextExtentPointW(hdc, textRight, lenRight, &extentRight);
-
-		const auto hight = Max(extentLeft.cy, extentMid.cy, extentRight.cy);
-		const auto y = r.top + (r.height() - hight) / 2;
-
-		if (lenMid > 0)
+		if (!text_mid.empty())
 		{
-			const auto oldBkCol = SetBkColor(hdc, highlightBk);
-			const auto oldBkMode = SetBkMode(hdc, OPAQUE);
-
-			ExtTextOutW(hdc, r.left + extentLeft.cx, y, 0, nullptr, textMid, static_cast<UINT>(lenMid), nullptr);
-
-			SetBkMode(hdc, oldBkMode);
-			SetBkColor(hdc, oldBkCol);
+			const pf::irect mid_rect(r.left + extent_left.cx, y,
+			                         r.left + extent_left.cx + extent_mid.cx, y + h);
+			dc.fill_solid_rect(mid_rect, unpack(highlightBk));
+			dc.draw_text_h(r.left + extent_left.cx, y, text_mid, font, unpack(normalText));
 		}
 
-		if (lenLeft > 0)
-		{
-			ExtTextOutW(hdc, r.left, y, 0, nullptr, textLeft, static_cast<UINT>(lenLeft), nullptr);
-		}
+		if (!text_left.empty())
+			dc.draw_text_h(r.left, y, text_left, font, unpack(normalText));
 
-		if (lenRight > 0)
-		{
-			ExtTextOutW(hdc, r.left + extentLeft.cx + extentMid.cx, y, 0, nullptr, textRight,
-			           static_cast<UINT>(lenRight), nullptr);
-		}
+		if (!text_right.empty())
+			dc.draw_text_h(r.left + extent_left.cx + extent_mid.cx, y, text_right, font, unpack(normalText));
 	}
-
-	SetTextColor(hdc, clrOld);
 }
 
 std::string::size_type find_close_bracket(const std::string& s, const std::string::size_type off,
-                                           const char open_b, const char close_b)
+                                          const char open_b, const char close_b)
 {
 	int cnt = 0;
 
@@ -228,7 +201,7 @@ bool value_in_list(const std::string& val, const char* strings, const char delim
 
 std::vector<std::string> split_string(const std::string& strings, const char delim)
 {
-	char delims[2] = { delim, 0 };
+	char delims[2] = {delim, 0};
 	return split_string(strings, delims, "\"'");
 }
 
@@ -547,14 +520,21 @@ static web_color parse_rgb(const char* str)
 			return static_cast<byte>(clamp(safe_stoi(tok), 0, 255));
 		};
 
+		auto parse_alpha = [](const std::string& tok) -> byte
+		{
+			char* end = nullptr;
+			const auto a = strtof(tok.c_str(), &end);
+			if (!tok.empty() && tok.back() == '%')
+				return static_cast<byte>(clamp(static_cast<int>(a * 255.0f / 100.0f), 0, 255));
+			return static_cast<byte>(clamp(static_cast<int>(a * 255.0f), 0, 255));
+		};
+
 		if (tokens.size() >= 1) result.red = parse_channel(tokens[0]);
 		if (tokens.size() >= 2) result.green = parse_channel(tokens[1]);
 		if (tokens.size() >= 3) result.blue = parse_channel(tokens[2]);
 		if (tokens.size() >= 4)
 		{
-			char* end = nullptr;
-			const auto a = strtof(tokens[3].c_str(), &end);
-			result.alpha = static_cast<byte>(clamp(static_cast<int>(a * 255.0f), 0, 255));
+			result.alpha = parse_alpha(tokens[3]);
 		}
 	}
 	else if (!_strnicmp(str, "hsl", 3))
@@ -614,8 +594,12 @@ static web_color parse_rgb(const char* str)
 
 			if (tokens.size() >= 4)
 			{
-				const auto a = strtof(tokens[3].c_str(), &end);
-				result.alpha = static_cast<byte>(clamp(static_cast<int>(a * 255.0f), 0, 255));
+				const auto& tok = tokens[3];
+				const auto a = strtof(tok.c_str(), &end);
+				if (!tok.empty() && tok.back() == '%')
+					result.alpha = static_cast<byte>(clamp(static_cast<int>(a * 255.0f / 100.0f), 0, 255));
+				else
+					result.alpha = static_cast<byte>(clamp(static_cast<int>(a * 255.0f), 0, 255));
 			}
 		}
 	}

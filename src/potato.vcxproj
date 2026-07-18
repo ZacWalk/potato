@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -191,9 +191,9 @@
     <ClInclude Include="element.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="platform.h" />
     <ClInclude Include="style.h" />
     <ClInclude Include="targetver.h" />
-    <ClInclude Include="ui.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="core.cpp" />
@@ -206,22 +206,14 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="platform_win.cpp" />
     <ClCompile Include="style.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Potato.rc" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="res\arrow_down.png" />
-    <Image Include="res\arrow_left.png" />
-    <Image Include="res\arrow_right.png" />
-    <Image Include="res\arrow_up.png" />
-    <Image Include="res\bitmap1.bmp" />
-    <Image Include="res\menu.png" />
     <Image Include="res\potato.ico" />
-    <Image Include="res\refres.png" />
-    <Image Include="res\settings.png" />
-    <Image Include="res\stop.png" />
   </ItemGroup>
   <ItemGroup>
     <None Include="res\master.css" />

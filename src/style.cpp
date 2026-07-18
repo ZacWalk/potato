@@ -1,6 +1,6 @@
 // style.cpp - CSS shorthand parsing, media query evaluation, selector matching,
-// at-rule handling, stylesheet loading, and GDI+ rendering of text, borders,
-// backgrounds, and images.
+// at-rule handling, stylesheet loading, and rendering of text, borders,
+// backgrounds, and images via pf::draw_context.
 
 #include "pch.h"
 #include "document.h"
@@ -216,7 +216,7 @@ void style::add_property(const std::string& name, const std::string& val, const 
 				{
 					add_parsed_property("list-style-position", tok, important);
 				}
-				else if (starts(val, "url"))
+				else if (starts(tok, "url"))
 				{
 					add_parsed_property("list-style-image", tok, important);
 					if (!baseurl.empty())
@@ -473,6 +473,8 @@ void style::parse_short_background(const std::string& val, const std::string& ba
 
 	const auto tokens = split_string(val, " ", "(");
 	auto origin_found = false;
+	auto clip_found = false;
+	std::string last_box;
 
 	for (const auto& tok : tokens)
 	{
@@ -502,10 +504,12 @@ void style::parse_short_background(const std::string& val, const std::string& ba
 			{
 				add_parsed_property("background-origin", tok, important);
 				origin_found = true;
+				last_box = tok;
 			}
 			else
 			{
 				add_parsed_property("background-clip", tok, important);
+				clip_found = true;
 			}
 		}
 		else if (value_in_list(tok, "left;right;top;bottom;center") ||
@@ -524,6 +528,13 @@ void style::parse_short_background(const std::string& val, const std::string& ba
 				add_parsed_property("background-position", tok, important);
 			}
 		}
+	}
+
+	// Per CSS spec: if only one <box> value is given in the background shorthand,
+	// it applies to both background-origin and background-clip.
+	if (origin_found && !clip_found)
+	{
+		add_parsed_property("background-clip", last_box, important);
 	}
 }
 
@@ -707,11 +718,12 @@ std::shared_ptr<media_query> media_query::create_from_string(const std::string& 
 								length.fromString(expr_tokens[1]);
 								if (length.units() == css_units_dpcm)
 								{
+									// 1 dpcm = 2.54 dpi
 									expr.val = static_cast<int>(length.val() * 2.54);
 								}
 								else if (length.units() == css_units_dpi)
 								{
-									expr.val = static_cast<int>(length.val() * 2.54);
+									expr.val = static_cast<int>(length.val());
 								}
 								else
 								{
@@ -888,7 +900,7 @@ bool media_query_expression::check(const media_features& features) const
 		}
 		break;
 	case media_feature_min_device_height:
-		if (features.device_height <= val)
+		if (features.device_height >= val)
 		{
 			return true;
 		}
@@ -1667,125 +1679,88 @@ void css::parse_atrule(const std::string& text, const std::string& baseurl, docu
 }
 
 
-static size get_img_size(const std::shared_ptr<Gdiplus::Bitmap>& bmp)
+static size get_img_size(const pf::bitmap_ptr& bmp)
 {
 	size result;
 
 	if (bmp)
 	{
-		result.width = bmp->GetWidth();
-		result.height = bmp->GetHeight();
+		result.width = bmp->width;
+		result.height = bmp->height;
 	}
 
 	return result;
 }
 
-
-static void draw_img(const HDC hdc, const std::shared_ptr<Gdiplus::Bitmap>& bmp, const position& pos)
+static pf::color_t to_pf_color(const web_color& c)
 {
-	if (bmp)
+	return pf::color_t(c.red, c.green, c.blue);
+}
+
+static void draw_img(pf::draw_context& dc, const pf::bitmap_ptr& bmp, const position& pos)
+{
+	if (bmp && !bmp->empty())
 	{
-		Gdiplus::Graphics graphics(hdc);
-		graphics.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
-		graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-		graphics.DrawImage(bmp.get(), pos.x, pos.y, pos.width, pos.height);
+		dc.draw_bitmap(pf::irect(pos.x, pos.y, pos.x + pos.width, pos.y + pos.height), *bmp);
 	}
 }
 
-static void draw_img_bg(const HDC hdc, const std::shared_ptr<Gdiplus::Bitmap>& bgbmp, const position& draw_pos,
-                        const position& pos, const background_repeat repeat, background_attachment attachment)
+static void draw_img_bg(pf::draw_context& dc, const pf::bitmap_ptr& bgbmp, const position& draw_pos,
+                        const position& pos, const background_repeat repeat, background_attachment /*attachment*/)
 {
-	int img_width = bgbmp->GetWidth();
-	int img_height = bgbmp->GetHeight();
+	if (!bgbmp || bgbmp->empty()) return;
 
-	Gdiplus::Graphics graphics(hdc);
-	graphics.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
-	graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+	const int img_width = bgbmp->width;
+	const int img_height = bgbmp->height;
 
-	const Gdiplus::Region reg(Gdiplus::Rect(draw_pos.left(), draw_pos.top(), draw_pos.width, draw_pos.height));
-	graphics.SetClip(&reg);
+	dc.set_clip_rect(pf::irect(draw_pos.left(), draw_pos.top(), draw_pos.right(), draw_pos.bottom()));
+
+	const auto blit = [&](const int x, const int y)
+	{
+		dc.draw_bitmap(pf::irect(x, y, x + img_width, y + img_height), *bgbmp);
+	};
 
 	switch (repeat)
 	{
 	case background_repeat_no_repeat:
-		{
-			graphics.DrawImage(bgbmp.get(), pos.x, pos.y, bgbmp->GetWidth(), bgbmp->GetHeight());
-		}
+		blit(pos.x, pos.y);
 		break;
 	case background_repeat_repeat_x:
-		{
-			Gdiplus::CachedBitmap bmp(bgbmp.get(), &graphics);
-			for (int x = pos.left(); x < pos.right(); x += bgbmp->GetWidth())
-			{
-				graphics.DrawCachedBitmap(&bmp, x, pos.top());
-			}
-
-			for (int x = pos.left() - bgbmp->GetWidth(); x + static_cast<int>(bgbmp->GetWidth()) > draw_pos.left(); x -=
-			     bgbmp->GetWidth())
-			{
-				graphics.DrawCachedBitmap(&bmp, x, pos.top());
-			}
-		}
+		for (int x = pos.left(); x < pos.right(); x += img_width)
+			blit(x, pos.top());
+		for (int x = pos.left() - img_width; x + img_width > draw_pos.left(); x -= img_width)
+			blit(x, pos.top());
 		break;
 	case background_repeat_repeat_y:
-		{
-			Gdiplus::CachedBitmap bmp(bgbmp.get(), &graphics);
-			for (int y = pos.top(); y < pos.bottom(); y += bgbmp->GetHeight())
-			{
-				graphics.DrawCachedBitmap(&bmp, pos.left(), y);
-			}
-
-			for (int y = pos.top() - bgbmp->GetHeight(); y + static_cast<int>(bgbmp->GetHeight()) > draw_pos.top(); y -=
-			     bgbmp->GetHeight())
-			{
-				graphics.DrawCachedBitmap(&bmp, pos.left(), y);
-			}
-		}
+		for (int y = pos.top(); y < pos.bottom(); y += img_height)
+			blit(pos.left(), y);
+		for (int y = pos.top() - img_height; y + img_height > draw_pos.top(); y -= img_height)
+			blit(pos.left(), y);
 		break;
 	case background_repeat_repeat:
+		if (img_height > 0 && img_width > 0)
 		{
-			Gdiplus::CachedBitmap bmp(bgbmp.get(), &graphics);
-			if (bgbmp->GetHeight() >= 0)
-			{
-				for (int x = pos.left(); x < pos.right(); x += bgbmp->GetWidth())
-				{
-					for (int y = pos.top(); y < pos.bottom(); y += bgbmp->GetHeight())
-					{
-						graphics.DrawCachedBitmap(&bmp, x, y);
-					}
-				}
-			}
+			for (int x = pos.left(); x < pos.right(); x += img_width)
+				for (int y = pos.top(); y < pos.bottom(); y += img_height)
+					blit(x, y);
 		}
 		break;
 	}
+
+	dc.clear_clip_rect();
 }
 
 
-int render_win32::line_height(const HFONT hFont)
+int render_win32::line_height(const pf::font_handle hFont)
 {
-	const auto oldFont = static_cast<HFONT>(SelectObject(_hdc, hFont));
-	TEXTMETRIC tm;
-	GetTextMetrics(_hdc, &tm);
-	SelectObject(_hdc, oldFont);
-	return static_cast<int>(tm.tmHeight);
+	return pf::line_height_for_font(hFont);
 }
 
 
-void render_win32::draw_text(const char* text, const HFONT hFont, const web_color& color, const position& pos)
+void render_win32::draw_text(const char* text, const pf::font_handle hFont, const web_color& color, const position& pos)
 {
 	apply_clip();
-
-	const auto oldFont = static_cast<HFONT>(SelectObject(_hdc, hFont));
-
-	SetBkMode(_hdc, TRANSPARENT);
-
-	SetTextColor(_hdc, RGB(color.red, color.green, color.blue));
-
-	const auto wtext = to_utf16(text);
-	ExtTextOutW(_hdc, pos.left(), pos.top(), 0, nullptr, wtext.c_str(), static_cast<UINT>(wtext.size()), nullptr);
-
-	SelectObject(_hdc, oldFont);
-
+	_ctx->draw_text_h(pos.left(), pos.top(), text ? text : "", hFont, to_pf_color(color));
 	release_clip();
 }
 
@@ -1829,12 +1804,12 @@ void render_win32::draw_list_marker(const list_marker& marker)
 	release_clip();
 }
 
-void render_win32::draw_image(const std::shared_ptr<Gdiplus::Bitmap>& bm, const position& pos)
+void render_win32::draw_image(const pf::bitmap_ptr& bm, const position& pos)
 {
-	draw_img(_hdc, bm, pos);
+	draw_img(*_ctx, bm, pos);
 }
 
-size render_win32::get_image_size(const std::shared_ptr<Gdiplus::Bitmap>& bm)
+size render_win32::get_image_size(const pf::bitmap_ptr& bm)
 {
 	return get_img_size(bm);
 }
@@ -1853,29 +1828,9 @@ void render_win32::draw_background(render_win32& renderer, const background_pain
 
 	if (img)
 	{
-		auto img_sz = get_img_size(img);
 		const position pos(bg.position_x, bg.position_y, bg.image_size.width, bg.image_size.height);
 		const auto draw_pos = pos;
-
-		/*if (bg_pos.x.units() != css_units_percentage)
-		{
-		pos.x += (int) bg_pos.x.val();
-		}
-		else
-		{
-		pos.x += (int) ((float) (draw_pos.width - img_sz.width) * bg_pos.x.val() / 100.0);
-		}
-
-		if (bg_pos.y.units() != css_units_percentage)
-		{
-		pos.y += (int) bg_pos.y.val();
-		}
-		else
-		{
-		pos.y += (int) ((float) (draw_pos.height - img_sz.height) * bg_pos.y.val() / 100.0);
-		}*/
-
-		draw_img_bg(_hdc, img, draw_pos, pos, bg.repeat, bg.attachment);
+		draw_img_bg(*_ctx, img, draw_pos, pos, bg.repeat, bg.attachment);
 	}
 
 	release_clip();
@@ -1903,75 +1858,38 @@ void render_win32::del_clip()
 	if (!m_clips.empty())
 	{
 		m_clips.pop_back();
-		if (!m_clips.empty())
-		{
-			position clip_pos = m_clips.back();
-		}
 	}
 }
 
 void render_win32::apply_clip()
 {
-	if (m_hClipRgn)
-	{
-		DeleteObject(m_hClipRgn);
-		m_hClipRgn = nullptr;
-	}
-
 	if (!m_clips.empty())
 	{
-		POINT ptView = {0, 0};
-		GetWindowOrgEx(_hdc, &ptView);
-
 		const position clip_pos = m_clips.back();
-		m_hClipRgn = CreateRectRgn(clip_pos.left() - ptView.x, clip_pos.top() - ptView.y, clip_pos.right() - ptView.x,
-		                           clip_pos.bottom() - ptView.y);
-		SelectClipRgn(_hdc, m_hClipRgn);
+		_ctx->set_clip_rect(pf::irect(clip_pos.left(), clip_pos.top(), clip_pos.right(), clip_pos.bottom()));
 	}
 }
 
 void render_win32::release_clip()
 {
-	SelectClipRgn(_hdc, nullptr);
-
-	if (m_hClipRgn)
-	{
-		DeleteObject(m_hClipRgn);
-		m_hClipRgn = nullptr;
-	}
+	_ctx->clear_clip_rect();
 }
 
 void render_win32::draw_ellipse(const int x, const int y, const int width, const int height, const web_color& color,
                                 int line_width)
 {
-	Gdiplus::Graphics graphics(_hdc);
-	Gdiplus::LinearGradientBrush* brush = nullptr;
-
-	graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
-	graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-
-	const Gdiplus::Pen pen(Gdiplus::Color(color.alpha, color.red, color.green, color.blue));
-	graphics.DrawEllipse(&pen, x, y, width, height);
+	_ctx->draw_ellipse(x, y, width, height, to_pf_color(color), line_width > 0 ? line_width : 1);
 }
 
 void render_win32::fill_ellipse(const int x, const int y, const int width, const int height, const web_color& color)
 {
-	Gdiplus::Graphics graphics(_hdc);
-
-	graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
-	graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-
-	const Gdiplus::SolidBrush brush(Gdiplus::Color(color.alpha, color.red, color.green, color.blue));
-	graphics.FillEllipse(&brush, x, y, width, height);
+	_ctx->fill_ellipse(x, y, width, height, to_pf_color(color));
 }
 
 void render_win32::fill_rect(const int x, const int y, const int width, const int height, const web_color& color,
                              const css_border_radius& radius)
 {
-	Gdiplus::Graphics graphics(_hdc);
-
-	const Gdiplus::SolidBrush brush(Gdiplus::Color(color.alpha, color.red, color.green, color.blue));
-	graphics.FillRectangle(&brush, x, y, width, height);
+	_ctx->fill_solid_rect(x, y, width, height, to_pf_color(color));
 }
 
 
@@ -1979,61 +1897,27 @@ void render_win32::draw_borders(const css_borders& borders, const position& draw
 {
 	apply_clip();
 
-	// draw left border
 	if (borders.left.width.val() != 0 && borders.left.style > border_style_hidden)
 	{
-		const HPEN pen = CreatePen(PS_SOLID, 1, RGB(borders.left.color.red, borders.left.color.green,
-		                                            borders.left.color.blue));
-		const auto oldPen = static_cast<HPEN>(SelectObject(_hdc, pen));
-		for (int x = 0; x < borders.left.width.val(); x++)
-		{
-			MoveToEx(_hdc, draw_pos.left() + x, draw_pos.top(), nullptr);
-			LineTo(_hdc, draw_pos.left() + x, draw_pos.bottom());
-		}
-		SelectObject(_hdc, oldPen);
-		DeleteObject(pen);
+		const int w = borders.left.width.val();
+		_ctx->fill_solid_rect(draw_pos.left(), draw_pos.top(), w, draw_pos.height, to_pf_color(borders.left.color));
 	}
-	// draw right border
 	if (borders.right.width.val() != 0 && borders.right.style > border_style_hidden)
 	{
-		const HPEN pen = CreatePen(PS_SOLID, 1, RGB(borders.right.color.red, borders.right.color.green,
-		                                            borders.right.color.blue));
-		const auto oldPen = static_cast<HPEN>(SelectObject(_hdc, pen));
-		for (int x = 0; x < borders.right.width.val(); x++)
-		{
-			MoveToEx(_hdc, draw_pos.right() - x - 1, draw_pos.top(), nullptr);
-			LineTo(_hdc, draw_pos.right() - x - 1, draw_pos.bottom());
-		}
-		SelectObject(_hdc, oldPen);
-		DeleteObject(pen);
+		const int w = borders.right.width.val();
+		_ctx->fill_solid_rect(draw_pos.right() - w, draw_pos.top(), w, draw_pos.height,
+		                      to_pf_color(borders.right.color));
 	}
-	// draw top border
 	if (borders.top.width.val() != 0 && borders.top.style > border_style_hidden)
 	{
-		const HPEN pen = CreatePen(PS_SOLID, 1, RGB(borders.top.color.red, borders.top.color.green,
-		                                            borders.top.color.blue));
-		const auto oldPen = static_cast<HPEN>(SelectObject(_hdc, pen));
-		for (int y = 0; y < borders.top.width.val(); y++)
-		{
-			MoveToEx(_hdc, draw_pos.left(), draw_pos.top() + y, nullptr);
-			LineTo(_hdc, draw_pos.right(), draw_pos.top() + y);
-		}
-		SelectObject(_hdc, oldPen);
-		DeleteObject(pen);
+		const int h = borders.top.width.val();
+		_ctx->fill_solid_rect(draw_pos.left(), draw_pos.top(), draw_pos.width, h, to_pf_color(borders.top.color));
 	}
-	// draw bottom border
 	if (borders.bottom.width.val() != 0 && borders.bottom.style > border_style_hidden)
 	{
-		const HPEN pen = CreatePen(PS_SOLID, 1, RGB(borders.bottom.color.red, borders.bottom.color.green,
-		                                            borders.bottom.color.blue));
-		const auto oldPen = static_cast<HPEN>(SelectObject(_hdc, pen));
-		for (int y = 0; y < borders.bottom.width.val(); y++)
-		{
-			MoveToEx(_hdc, draw_pos.left(), draw_pos.bottom() - y - 1, nullptr);
-			LineTo(_hdc, draw_pos.right(), draw_pos.bottom() - y - 1);
-		}
-		SelectObject(_hdc, oldPen);
-		DeleteObject(pen);
+		const int h = borders.bottom.width.val();
+		_ctx->fill_solid_rect(draw_pos.left(), draw_pos.bottom() - h, draw_pos.width, h,
+		                      to_pf_color(borders.bottom.color));
 	}
 
 	release_clip();

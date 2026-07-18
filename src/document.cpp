@@ -4,12 +4,124 @@
 
 #include "pch.h"
 #include "document.h"
-#include "ui.h"
+// ui.h removed: document.cpp now uses view_host + dispatch_to_ui/async from core.h
 #include "resource.h"
 
 
-#pragma comment(lib, "winhttp.lib")
+// Async HTTP — wraps pf::async_http_session to download to a temp file and
+// then deliver a single completion callback (file_path, error, status, url).
 
+bool http::open(std::string_view user_agent)
+{
+	m_session = pf::create_async_http_session(user_agent);
+	return static_cast<bool>(m_session);
+}
+
+void http::close()
+{
+	stop();
+	m_session.reset();
+}
+
+void http::stop()
+{
+	std::vector<std::shared_ptr<http_request>> snapshot;
+	{
+		std::lock_guard lk(m_mutex);
+		snapshot = m_requests;
+	}
+	for (const auto& r : snapshot) r->cancel();
+	if (m_session) m_session->stop();
+}
+
+bool http::download_file(const std::string& url_in, const std::shared_ptr<http_request>& request)
+{
+	if (!request || !m_session) return false;
+
+	std::string url = url_in;
+	if (!starts(url, "http://") && !starts(url, "https://"))
+	{
+		url = "https://" + url;
+	}
+
+	const std::string temp_path = pf::platform_temp_file_path("pot");
+	auto file = pf::open_file_for_write(pf::file_path(temp_path));
+	if (!file) return false;
+
+	{
+		std::lock_guard lk(m_mutex);
+		m_requests.push_back(request);
+	}
+
+	struct ctx_t
+	{
+		std::shared_ptr<http_request> req;
+		pf::writable_file_handle_ptr file;
+		std::string file_path;
+		std::string url;
+		http* parent = nullptr;
+		std::atomic<int> status_code{0};
+		std::atomic<bool> done{false};
+	};
+	auto ctx = std::make_shared<ctx_t>();
+	ctx->req = request;
+	ctx->file = std::move(file);
+	ctx->file_path = temp_path;
+	ctx->url = url;
+	ctx->parent = this;
+
+	pf::async_http_callbacks cb;
+	cb.on_headers = [ctx](int status, std::string, uint64_t)
+	{
+		ctx->status_code = status;
+	};
+	cb.on_data = [ctx](const uint8_t* data, size_t size)
+	{
+		if (ctx->file) ctx->file->write(data, static_cast<uint32_t>(size));
+	};
+	auto finish = [ctx](uint32_t error)
+	{
+		if (ctx->done.exchange(true)) return;
+		ctx->file.reset();
+		auto cb_user = ctx->req->m_callback;
+		auto file_path = ctx->file_path;
+		auto url_capture = ctx->url;
+		auto status = static_cast<uint32_t>(ctx->status_code.load());
+		auto* parent = ctx->parent;
+		auto req = ctx->req;
+		// Remove the request from the parent http synchronously while we still
+		// know the parent is alive (this callback fires on the http worker
+		// thread, which the parent's destructor waits on via stop()).
+		if (parent)
+		{
+			std::lock_guard lk(parent->m_mutex);
+			std::erase(parent->m_requests, req);
+		}
+		dispatch_to_ui([cb_user = std::move(cb_user), file_path = std::move(file_path),
+				error, status, url_capture = std::move(url_capture), req]()
+			{
+				if (cb_user) cb_user(file_path, error, status, url_capture);
+			});
+	};
+	cb.on_complete = [finish]() { finish(0); };
+	cb.on_error = [finish](std::string) { finish(1); };
+
+	auto async = m_session->get(url, std::move(cb));
+	if (!async)
+	{
+		std::lock_guard lk(m_mutex);
+		std::erase(m_requests, request);
+		return false;
+	}
+	request->set_async(std::move(async));
+	return true;
+}
+
+
+// ── Removed legacy WinHTTP-direct http/http_request implementation ───────────
+// The previous ~370 line block below has been replaced by the pf::async_http_session
+// wrapper above. Kept the comment marker for git history clarity.
+#if 0
 http::~http()
 {
 	stop();
@@ -362,7 +474,7 @@ void http_request::on_finish(const DWORD dwError, LPCWSTR /*errMsg*/)
 	auto status = m_status;
 	auto url = m_url;
 
-	run_on_ui([cb = std::move(cb), f = std::move(f), err, status, url = std::move(url)]()
+	dispatch_to_ui([cb = std::move(cb), f = std::move(f), err, status, url = std::move(url)]()
 	{
 		if (cb) cb(f, err, status, url);
 	});
@@ -376,6 +488,7 @@ void http_request::on_data(const LPCBYTE data, const DWORD len, ULONG64 /*downlo
 		WriteFile(m_hFile, data, len, &written, nullptr);
 	}
 }
+#endif
 
 
 html_entities g_html_entities[] =
@@ -652,7 +765,8 @@ omitted_end_tags_t parser::m_omitted_end_tags[] =
 	{"dt", "dt;dd"},
 	{"dd", "dt;dd"},
 	{
-		"p", "address;article;aside;blockquote;div;dl;fieldset;footer;form;h1;h2;h3;h4;h5;h6;header;hgroup;hr;main;nav;ol;p;pre;section;table;ul"
+		"p",
+		"address;article;aside;blockquote;div;dl;fieldset;footer;form;h1;h2;h3;h4;h5;h6;header;hgroup;hr;main;nav;ol;p;pre;section;table;ul"
 	},
 	{"rb", "rb;rt;rtc;rp"},
 	{"rt", "rb;rt;rtc;rp"},
@@ -768,7 +882,7 @@ void parser::parse_tag_start(const std::string& tag_name)
 
 	if (el)
 	{
-		if (m_parse_stack.back()->get_tag_name() == "html")
+		if (!m_parse_stack.empty() && m_parse_stack.back()->get_tag_name() == "html")
 		{
 			// if last element is root we have to add head or body
 			if (!value_in_list(tag_name, "head;body"))
@@ -830,6 +944,8 @@ void parser::parse_attribute(const std::string& attr_name, const std::string& at
 
 void parser::parse_word(const std::string& val)
 {
+	if (m_parse_stack.empty()) return;
+
 	if (m_parse_stack.back()->get_tag_name() == "html")
 	{
 		parse_push_element(create_element("body"));
@@ -941,6 +1057,7 @@ void parser::parse_pop_to_parent(const std::string& parents, const std::string& 
 		{
 			found = true;
 			parent = i;
+			break;
 		}
 		if (m_parse_stack[i]->get_tag_name() == stop_parent)
 		{
@@ -959,6 +1076,8 @@ void parser::parse_pop_to_parent(const std::string& parents, const std::string& 
 
 void parser::parse_close_omitted_end(const std::string& tag)
 {
+	if (m_parse_stack.empty()) return;
+
 	for (int i = 0; m_omitted_end_tags[i].tag; i++)
 	{
 		if (m_parse_stack.back()->get_tag_name() == m_omitted_end_tags[i].tag)
@@ -993,9 +1112,9 @@ void parser::parse_open_omitted_start(const std::string& tag)
 }
 
 
-document::document(html_view& v) : m_view(v), m_over_element(nullptr)
+document::document(view_host& v) : m_view(v), m_over_element(nullptr)
 {
-	m_http.open(L"potato/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, nullptr, nullptr);
+	m_http.open("potato/1.0");
 }
 
 document::~document()
@@ -1008,8 +1127,8 @@ document::~document()
 	{
 		if (fi.font)
 		{
-			DeleteObject(fi.font);
-			fi.font = nullptr;
+			pf::delete_font_handle(fi.font);
+			fi.font = 0;
 		}
 	}
 }
@@ -1092,7 +1211,7 @@ static void parse_stream(std::shared_ptr<document> doc, tstream& str, parser& pa
 }
 
 template <class tstream>
-static std::shared_ptr<document> create_from_stream(html_view& view, const std::string& url, tstream& str)
+static std::shared_ptr<document> create_from_stream(view_host& view, const std::string& url, tstream& str)
 {
 	auto doc = std::make_shared<document>(view);
 
@@ -1108,7 +1227,7 @@ static std::shared_ptr<document> create_from_stream(html_view& view, const std::
 }
 
 template <class tstream>
-static std::shared_ptr<document> parse_from_stream(html_view& view, const std::string& url, tstream& str)
+static std::shared_ptr<document> parse_from_stream(view_host& view, const std::string& url, tstream& str)
 {
 	auto doc = std::make_shared<document>(view);
 
@@ -1163,25 +1282,25 @@ void document::finalize()
 	m_view.layout();
 }
 
-std::shared_ptr<document> document::create_from_utf16(html_view& view, const std::string& url, const std::string& str)
+std::shared_ptr<document> document::create_from_utf16(view_host& view, const std::string& url, const std::string& str)
 {
 	default_instream si(str);
 	return create_from_stream(view, url, si);
 }
 
-std::shared_ptr<document> document::create_from_utf8(html_view& view, const std::string& url, const std::string& str)
+std::shared_ptr<document> document::create_from_utf8(view_host& view, const std::string& url, const std::string& str)
 {
 	utf8_instream si(str);
 	return create_from_stream(view, url, si);
 }
 
-std::shared_ptr<document> document::parse_from_utf16(html_view& view, const std::string& url, const std::string& str)
+std::shared_ptr<document> document::parse_from_utf16(view_host& view, const std::string& url, const std::string& str)
 {
 	default_instream si(str);
 	return parse_from_stream(view, url, si);
 }
 
-std::shared_ptr<document> document::parse_from_utf8(html_view& view, const std::string& url, const std::string& str)
+std::shared_ptr<document> document::parse_from_utf8(view_host& view, const std::string& url, const std::string& str)
 {
 	utf8_instream si(str);
 	return parse_from_stream(view, url, si);
@@ -1197,13 +1316,14 @@ void document::apply_stylesheet()
 {
 	update_styles(m_root.get());
 	auto pThis = shared_from_this();
-	run_on_ui([pThis]() { pThis->m_view.layout(); });
+	dispatch_to_ui([pThis]() { pThis->m_view.layout(); });
 }
 
-HFONT document::add_font(const std::string& name_in, int size, const std::string& weight, const std::string& style,
-                         const std::string& decoration, font_metrics* fm)
+pf::font_handle document::add_font(const std::string& name_in, int size, const std::string& weight,
+                                   const std::string& style,
+                                   const std::string& decoration, font_metrics* fm)
 {
-	HFONT ret = nullptr;
+	pf::font_handle ret = 0;
 	auto name = name_in;
 
 	if (name.empty() || is_equal(name.c_str(), "inherit"))
@@ -1282,43 +1402,41 @@ HFONT document::add_font(const std::string& name_in, int size, const std::string
 			}
 		}
 
-		font_item fi = {nullptr};
+		font_item fi = {0};
 
 		auto fonts = split_string(name, ',');
 		trim(fonts[0]);
 
-		LOGFONT lf;
-		ZeroMemory(&lf, sizeof(lf));
-		const auto wfont = to_utf16(fonts[0]);
-		wcscpy_s(lf.lfFaceName, LF_FACESIZE, wfont.c_str());
+		pf::font_def def;
+		def.face = fonts[0];
+		def.size = size;
+		def.weight = fw;
+		def.italic = fs == font_style_italic;
+		def.underline = (decor & font_decoration_underline) != 0;
+		def.strikeout = (decor & font_decoration_linethrough) != 0;
 
-		lf.lfHeight = -size;
-		lf.lfWeight = fw;
-		lf.lfItalic = fs == font_style_italic ? TRUE : FALSE;
-		lf.lfCharSet = DEFAULT_CHARSET;
-		lf.lfOutPrecision = OUT_DEFAULT_PRECIS;
-		lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
-		lf.lfQuality = CLEARTYPE_QUALITY;
-		lf.lfStrikeOut = decor & font_decoration_linethrough ? TRUE : FALSE;
-		lf.lfUnderline = decor & font_decoration_underline ? TRUE : FALSE;
+		pf::font_metrics_data m{};
+		fi.font = pf::create_font_handle(def, &m);
 
-		fi.font = CreateFontIndirect(&lf);
-
-		win_dc hdc(nullptr);
-		auto oldFont = static_cast<HFONT>(SelectObject(hdc, fi.font));
-		TEXTMETRIC tm;
-		GetTextMetrics(hdc, &tm);
-		SelectObject(hdc, oldFont);
-
-		fi.metrics.height = tm.tmHeight;
-		fi.metrics.x_height = tm.tmHeight;
-		fi.metrics.ascent = tm.tmAscent;
-		fi.metrics.descent = tm.tmDescent;
+		fi.metrics.height = m.height;
+		fi.metrics.x_height = m.x_height;
+		fi.metrics.ascent = m.ascent;
+		fi.metrics.descent = m.descent;
 		fi.metrics.draw_spaces = true;
 
 		{
 			std::lock_guard lock(m_fonts_mutex);
-			m_fonts[key] = fi;
+			// Another thread may have created the same font while the lock was released;
+			// prefer the existing entry to avoid duplicates.
+			const auto it = m_fonts.find(key);
+			if (it != m_fonts.end())
+			{
+				fi = it->second;
+			}
+			else
+			{
+				m_fonts[key] = fi;
+			}
 		}
 		ret = fi.font;
 
@@ -1330,8 +1448,9 @@ HFONT document::add_font(const std::string& name_in, int size, const std::string
 	return ret;
 }
 
-HFONT document::get_font(const std::string& name_in, int size, const std::string& weight, const std::string& style,
-                         const std::string& decoration, font_metrics* fm)
+pf::font_handle document::get_font(const std::string& name_in, int size, const std::string& weight,
+                                   const std::string& style,
+                                   const std::string& decoration, font_metrics* fm)
 {
 	auto name = name_in;
 
@@ -1453,19 +1572,19 @@ int document::cvt_units(css_length& val, const int fontSize, const int size)
 		val.set_value(static_cast<float>(ret), css_units_px);
 		break;
 	case css_units_vw:
-		ret = round_f(val.val() * GetSystemMetrics(SM_CXSCREEN) / 100.0f);
+		ret = round_f(val.val() * pf::platform_screen_size().cx / 100.0f);
 		val.set_value(static_cast<float>(ret), css_units_px);
 		break;
 	case css_units_vh:
-		ret = round_f(val.val() * GetSystemMetrics(SM_CYSCREEN) / 100.0f);
+		ret = round_f(val.val() * pf::platform_screen_size().cy / 100.0f);
 		val.set_value(static_cast<float>(ret), css_units_px);
 		break;
 	case css_units_vmin:
-		ret = round_f(val.val() * std::min(GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) / 100.0f);
+		ret = round_f(val.val() * std::min(pf::platform_screen_size().cx, pf::platform_screen_size().cy) / 100.0f);
 		val.set_value(static_cast<float>(ret), css_units_px);
 		break;
 	case css_units_vmax:
-		ret = round_f(val.val() * std::max(GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) / 100.0f);
+		ret = round_f(val.val() * std::max(pf::platform_screen_size().cx, pf::platform_screen_size().cy) / 100.0f);
 		val.set_value(static_cast<float>(ret), css_units_px);
 		break;
 	case css_units_pt:
@@ -1692,14 +1811,9 @@ void document::set_base_url(const std::string& base_url)
 {
 	if (!base_url.empty())
 	{
-		if (PathIsRelativeA(base_url.c_str()) && !PathIsURLA(base_url.c_str()))
-		{
-			m_base_path = make_url(base_url, m_url);
-		}
-		else
-		{
-			m_base_path = base_url;
-		}
+		// pf::resolve_url returns base_url unchanged when it is already absolute,
+		// otherwise resolves it against m_url.
+		m_base_path = pf::resolve_url(m_url, base_url);
 	}
 	else
 	{
@@ -1736,8 +1850,8 @@ void document::import_css(const std::string& url, const std::string& baseurl, co
 	auto pThis = shared_from_this();
 
 	m_http.download_file(css_url, std::make_shared<http_request>(
-		                     [pThis, css_url, media](const std::string& file_name, const DWORD error,
-		                                             const DWORD httpStatus,
+		                     [pThis, css_url, media](const std::string& file_name, const uint32_t error,
+		                                             const uint32_t httpStatus,
 		                                             const std::string& /*reqUrl*/)
 		                     {
 			                     if (error || httpStatus >= 400) return;
@@ -1746,12 +1860,12 @@ void document::import_css(const std::string& url, const std::string& baseurl, co
 
 			                     // Stylesheet parsing and selector sort can be slow; do them on the
 			                     // background thread, then apply on the UI thread once.
-			                     run_async([pThis, css_url, css_text, media]()
+			                     dispatch_async([pThis, css_url, css_text, media]()
 			                     {
 				                     pThis->add_stylesheet(css_text, css_url, media);
 				                     pThis->m_styles.sort_selectors();
 
-				                     run_on_ui([pThis]()
+				                     dispatch_to_ui([pThis]()
 				                     {
 					                     if (pThis->m_root)
 					                     {
@@ -1769,8 +1883,8 @@ void document::import_css(const std::string& url, const std::string& baseurl, co
 void document::on_anchor_click(const std::string& url, element* el)
 {
 	auto full = make_url(url, m_base_path);
-	html_view* view = &m_view;
-	run_on_ui([view, full] { view->open(full); });
+	view_host* view = &m_view;
+	dispatch_to_ui([view, full] { view->open(full); });
 }
 
 void document::set_cursor(const std::string& cursor)
@@ -1788,14 +1902,14 @@ void document::load_image(const std::string& url, const std::string& base)
 		m_images[image_url] = nullptr; // Indicate loading
 
 		m_http.download_file(image_url, std::make_shared<http_request>(
-			                     [pThis, image_url](const std::string& file_name, const DWORD error,
-			                                        const DWORD httpStatus, const std::string& reqUrl)
+			                     [pThis, image_url](const std::string& file_name, const uint32_t error,
+			                                        const uint32_t httpStatus, const std::string& reqUrl)
 			                     {
 				                     if (error || httpStatus >= 400)
 				                     {
 					                     return;
 				                     }
-				                     pThis->m_images[image_url] = std::make_shared<Gdiplus::Bitmap>(to_utf16(file_name).c_str());
+				                     pThis->m_images[image_url] = pf::load_bitmap_file(pf::file_path(file_name));
 				                     // Re-layout only if the image differs in size from the placeholder; for
 				                     // simplicity request layout once per page-load tick by invalidating. Many
 				                     // pages (e.g. Wikipedia) have hundreds of images and a full re-layout per
@@ -1805,13 +1919,13 @@ void document::load_image(const std::string& url, const std::string& base)
 	}
 }
 
-std::shared_ptr<Gdiplus::Bitmap> document::find_image(const std::string& url)
+pf::bitmap_ptr document::find_image(const std::string& url)
 {
 	const auto found = m_images.find(url);
 	return found != m_images.end() ? found->second : nullptr;
 }
 
-std::shared_ptr<Gdiplus::Bitmap> document::find_image(const std::string& url, const std::string& base)
+pf::bitmap_ptr document::find_image(const std::string& url, const std::string& base)
 {
 	return find_image(make_url(url, base));
 }
@@ -1823,34 +1937,26 @@ bool document::is_image_cached(const std::string& src, const std::string& baseur
 }
 
 
-void document::delete_font(const HFONT hFont)
+void document::delete_font(const pf::font_handle hFont)
 {
-	DeleteObject(hFont);
+	pf::delete_font_handle(hFont);
 }
 
-int document::text_width(const std::string& text, const HFONT hFont)
+int document::text_width(const std::string& text, const pf::font_handle hFont)
 {
-	win_dc hdc(nullptr);
-	const auto oldFont = static_cast<HFONT>(SelectObject(hdc, hFont));
-
-	SIZE sz = {0, 0};
-	const auto wtext = to_utf16(text);
-	GetTextExtentPoint32W(hdc, wtext.c_str(), static_cast<int>(wtext.size()), &sz);
-	SelectObject(hdc, oldFont);
-
-	return static_cast<int>(sz.cx);
+	return pf::measure_text_with_font(hFont, text).cx;
 }
 
 int document::pt_to_px(const int pt)
 {
-	win_dc hdc(nullptr);
-	return MulDiv(pt, GetDeviceCaps(hdc, LOGPIXELSY), 72);
+	return pt * pf::platform_screen_dpi() / 72;
 }
 
 
 void document::get_media_features(media_features& media)
 {
-	win_dc hdc(nullptr);
+	const auto dpi = pf::platform_screen_dpi();
+	const auto sz = pf::platform_screen_size();
 
 	media.type = media_type_screen;
 	media.width = m_client_pos.width;
@@ -1858,7 +1964,7 @@ void document::get_media_features(media_features& media)
 	media.color = 8;
 	media.monochrome = 0;
 	media.color_index = 256;
-	media.resolution = GetDeviceCaps(hdc, LOGPIXELSX);
-	media.device_width = GetDeviceCaps(hdc, HORZRES);
-	media.device_height = GetDeviceCaps(hdc, VERTRES);
+	media.resolution = dpi;
+	media.device_width = sz.cx;
+	media.device_height = sz.cy;
 }

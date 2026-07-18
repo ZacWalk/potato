@@ -4,9 +4,11 @@
 
 #pragma once
 
+#include <cstdint>
+#include <cstdarg>
 
 
-using LPCBYTE = const BYTE*;
+using byte = uint8_t;
 
 namespace sizing
 {
@@ -24,6 +26,62 @@ namespace sizing
 
 class document;
 class element;
+
+// View host abstract interface (implemented by html_view in ui.h). Allows the
+// document layer to invoke layout/invalidate without depending on Win32.
+class view_host
+{
+public:
+	virtual ~view_host() = default;
+	virtual void layout() = 0;
+	virtual void invalidate() = 0;
+	virtual void open(const std::string& url) = 0;
+};
+
+// UI thread dispatch. Implementations live in main.cpp and forward to the
+// existing tasks queues defined in ui.h. These declarations exist so that
+// document.cpp / core.cpp do not need to include ui.h.
+void dispatch_to_ui(std::function<void()> fn);
+void dispatch_async(std::function<void()> fn);
+
+namespace color
+{
+	constexpr unsigned highlight = 0x00CC6611;
+	constexpr unsigned hover = 0x00999999;
+	constexpr unsigned text = 0x00ffffff;
+	constexpr unsigned task_background = 0x00777777;
+}
+
+inline unsigned byte_clamp_u(const int n)
+{
+	return n > 255 ? 255u : n < 0 ? 0u : static_cast<unsigned>(n);
+}
+
+inline unsigned saturate_rgba_u(const int r, const int g, const int b, const int a)
+{
+	return byte_clamp_u(r) | byte_clamp_u(g) << 8 | byte_clamp_u(b) << 16 | byte_clamp_u(a) << 24;
+}
+
+inline unsigned get_a(const unsigned c) { return 0xffu & c >> 24; }
+inline unsigned get_r(const unsigned c) { return 0xffu & c; }
+inline unsigned get_g(const unsigned c) { return 0xffu & c >> 8; }
+inline unsigned get_b(const unsigned c) { return 0xffu & c >> 16; }
+
+inline unsigned lighten(const unsigned c, const int n = 32)
+{
+	return saturate_rgba_u(get_r(c) + n, get_g(c) + n, get_b(c) + n, get_a(c));
+}
+
+inline unsigned darken(const unsigned c, const int n = 32)
+{
+	return lighten(c, -n);
+}
+
+inline unsigned emphasize(const unsigned c, const int n = 48)
+{
+	const bool isLight = get_b(c) > 0x80 || get_g(c) > 0x80 || get_r(c) > 0x80;
+	return lighten(c, isLight ? -n : n);
+}
 
 constexpr unsigned int font_decoration_none = 0x00;
 constexpr unsigned int font_decoration_underline = 0x01;
@@ -105,18 +163,13 @@ struct position
 
 	bool does_intersect(const position* val) const
 	{
-		if (!val) return true;
+		if (!val) return false;
 
-		return (
-				left() <= val->right() &&
-				right() >= val->left() &&
-				bottom() >= val->top() &&
-				top() <= val->bottom())
-			|| (
-				val->left() <= right() &&
-				val->right() >= left() &&
-				val->bottom() >= top() &&
-				val->top() <= bottom());
+		return
+			left() <= val->right() &&
+			right() >= val->left() &&
+			bottom() >= val->top() &&
+			top() <= val->bottom();
 	}
 
 	bool empty() const
@@ -143,7 +196,7 @@ struct font_metrics
 
 struct font_item
 {
-	HFONT font;
+	pf::font_handle font = 0;
 	font_metrics metrics;
 };
 
@@ -752,29 +805,16 @@ inline int clamp_i(const int& v, const int& l, const int& h)
 	return v < l ? l : v > h ? h : v;
 }
 
-class size_i : public SIZE
+class size_i
 {
 public:
-	size_i()
-	{
-		cx = 0;
-		cy = 0;
-	}
+	int cx = 0;
+	int cy = 0;
 
-	size_i(const int initCX, const int initCY)
-	{
-		cx = initCX;
-		cy = initCY;
-	}
+	size_i() = default;
 
-	size_i(const SIZE& initSize)
+	size_i(const int initCX, const int initCY) : cx(initCX), cy(initCY)
 	{
-		*static_cast<SIZE*>(this) = initSize;
-	}
-
-	size_i(const POINT& initPt)
-	{
-		*(POINT*)this = initPt;
 	}
 
 	void set(const int initCX, const int initCY)
@@ -783,12 +823,12 @@ public:
 		cy = initCY;
 	}
 
-	bool operator ==(const SIZE& size) const
+	bool operator ==(const size_i& size) const
 	{
 		return cx == size.cx && cy == size.cy;
 	}
 
-	bool operator !=(const SIZE& size) const
+	bool operator !=(const size_i& size) const
 	{
 		return cx != size.cx || cy != size.cy;
 	}
@@ -798,12 +838,12 @@ public:
 		return cx == 0 && cy == 0;
 	}
 
-	size_i operator +(const SIZE& size) const
+	size_i operator +(const size_i& size) const
 	{
 		return size_i(cx + size.cx, cy + size.cy);
 	}
 
-	size_i operator -(const SIZE& size) const
+	size_i operator -(const size_i& size) const
 	{
 		return size_i(cx - size.cx, cy - size.cy);
 	}
@@ -813,51 +853,38 @@ public:
 		return size_i(-cx, -cy);
 	}
 
-	point_i operator +(const POINT& point) const;
-	point_i operator -(const POINT& point) const;
+	point_i operator +(const point_i& point) const;
+	point_i operator -(const point_i& point) const;
 };
 
-class point_i : public POINT
+class point_i
 {
 public:
-	point_i()
+	int x = 0;
+	int y = 0;
+
+	point_i() = default;
+
+	point_i(const int initX, const int initY) : x(initX), y(initY)
 	{
-		x = 0;
-		y = 0;
 	}
 
-	point_i(const int initX, const int initY)
-	{
-		x = initX;
-		y = initY;
-	}
-
-	point_i(const POINT& initPt)
-	{
-		*static_cast<POINT*>(this) = initPt;
-	}
-
-	point_i(const SIZE& initSize)
-	{
-		*(SIZE*)this = initSize;
-	}
-
-	bool operator ==(const POINT& point) const
+	bool operator ==(const point_i& point) const
 	{
 		return x == point.x && y == point.y;
 	}
 
-	bool operator !=(const POINT& point) const
+	bool operator !=(const point_i& point) const
 	{
 		return x != point.x || y != point.y;
 	}
 
-	point_i operator +(const SIZE& size) const
+	point_i operator +(const size_i& size) const
 	{
 		return point_i(x + size.cx, y + size.cy);
 	}
 
-	point_i operator -(const SIZE& size) const
+	point_i operator -(const size_i& size) const
 	{
 		return point_i(x - size.cx, y - size.cy);
 	}
@@ -867,72 +894,45 @@ public:
 		return point_i(-x, -y);
 	}
 
-	point_i operator +(const POINT& point) const
+	point_i operator +(const point_i& point) const
 	{
 		return point_i(x + point.x, y + point.y);
 	}
 
-	size_i operator -(const POINT& point) const
+	size_i operator -(const point_i& point) const
 	{
 		return size_i(x - point.x, y - point.y);
 	}
 
-	point_i clamp(const RECT& limit) const
-	{
-		return point_i(clamp_i(x, limit.left, limit.right), clamp_i(y, limit.top, limit.bottom));
-	}
+	point_i clamp(const recti& limit) const;
 };
 
-class recti : public RECT
+class recti
 {
 public:
-	// Constructors
-	recti()
+	int left = 0;
+	int top = 0;
+	int right = 0;
+	int bottom = 0;
+
+	recti() = default;
+
+	recti(const int l, const int t, const int r, const int b) : left(l), top(t), right(r), bottom(b)
 	{
-		left = 0;
-		top = 0;
-		right = 0;
-		bottom = 0;
 	}
 
-	recti(const int l, const int t, const int r, const int b)
-	{
-		left = l;
-		top = t;
-		right = r;
-		bottom = b;
-	}
-
-	recti(const RECT& other)
-	{
-		copy(&other);
-	}
-
-	recti(const LPCRECT other)
-	{
-		copy(other);
-	}
-
-	recti(const POINT& point, const SIZE& size)
+	recti(const point_i& point, const size_i& size)
 	{
 		right = (left = point.x) + size.cx;
 		bottom = (top = point.y) + size.cy;
 	}
 
-	recti(const POINT& topLeft, const POINT& bottomRight)
+	recti(const point_i& topLeft, const point_i& bottomRight)
 	{
 		left = topLeft.x;
 		top = topLeft.y;
 		right = bottomRight.x;
 		bottom = bottomRight.y;
-	}
-
-	void copy(const LPCRECT other)
-	{
-		left = other->left;
-		top = other->top;
-		right = other->right;
-		bottom = other->bottom;
 	}
 
 	int width() const
@@ -965,16 +965,6 @@ public:
 		return point_i((left + right) / 2, (top + bottom) / 2);
 	}
 
-	operator LPRECT()
-	{
-		return this;
-	}
-
-	operator LPCRECT() const
-	{
-		return this;
-	}
-
 	bool is_empty() const
 	{
 		return left >= right || top >= bottom;
@@ -985,7 +975,7 @@ public:
 		return left == 0 && right == 0 && top == 0 && bottom == 0;
 	}
 
-	bool contains(const POINT& point) const
+	bool contains(const point_i& point) const
 	{
 		return left <= point.x && right >= point.x && top <= point.y && bottom >= point.y;
 	}
@@ -1003,7 +993,7 @@ public:
 		bottom = y2;
 	}
 
-	void set(const POINT& topLeft, const POINT& bottomRight)
+	void set(const point_i& topLeft, const point_i& bottomRight)
 	{
 		set(topLeft.x, topLeft.y, bottomRight.x, bottomRight.y);
 	}
@@ -1041,7 +1031,7 @@ public:
 	recti union_with(const recti& other) const
 	{
 		if (is_empty()) return other;
-		if (other.is_empty()) return this;
+		if (other.is_empty()) return *this;
 		return recti(std::min(left, other.left), std::min(top, other.top), std::max(right, other.right),
 		             std::max(bottom, other.bottom));
 	}
@@ -1067,7 +1057,7 @@ public:
 
 	recti crop(const recti& limit) const
 	{
-		recti result(this);
+		recti result(*this);
 
 		if (top < limit.top) result.top = limit.top;
 		if (left < limit.left) result.left = limit.left;
@@ -1082,38 +1072,41 @@ public:
 		return recti(left + pt.x, top + pt.y, right + pt.x, bottom + pt.y);
 	}
 
+	recti offset(const size_i& s) const
+	{
+		return recti(left + s.cx, top + s.cy, right + s.cx, bottom + s.cy);
+	}
+
 	recti offset(const int x, const int y) const
 	{
 		return recti(left + x, top + y, right + x, bottom + y);
 	}
 
-	void operator =(const RECT& other)
-	{
-		copy(&other);
-	}
-
-	bool operator ==(const RECT& other) const
+	bool operator ==(const recti& other) const
 	{
 		return left == other.left && top == other.top && right == other.right && bottom == other.bottom;
 	}
 
-	bool operator !=(const RECT& other) const
+	bool operator !=(const recti& other) const
 	{
 		return left != other.left || top != other.top || right != other.right || bottom != other.bottom;
 	}
-
-	operator Gdiplus::Rect() const { return Gdiplus::Rect(left, top, width(), height()); };
 };
 
 
-inline point_i size_i::operator +(const POINT& point) const
+inline point_i size_i::operator +(const point_i& point) const
 {
 	return point_i(cx + point.x, cy + point.y);
 }
 
-inline point_i size_i::operator -(const POINT& point) const
+inline point_i size_i::operator -(const point_i& point) const
 {
 	return point_i(cx - point.x, cy - point.y);
+}
+
+inline point_i point_i::clamp(const recti& limit) const
+{
+	return point_i(clamp_i(x, limit.left, limit.right), clamp_i(y, limit.top, limit.bottom));
 }
 
 inline recti center_rect(const size_i& s, const int xx, const int yy)
@@ -1169,30 +1162,17 @@ inline const char* strichr(const char* text, const char cc)
 inline std::wstring to_utf16(const char* sz)
 {
 	if (!sz || !*sz) return std::wstring();
-	const auto len = static_cast<int>(strlen(sz));
-	const int size_needed = MultiByteToWideChar(CP_UTF8, 0, sz, len, nullptr, 0);
-	std::wstring result(size_needed, 0);
-	MultiByteToWideChar(CP_UTF8, 0, sz, len, &result[0], size_needed);
-	return result;
+	return pf::utf8_to_utf16(std::string_view(sz));
 }
 
 inline std::wstring to_utf16(const std::string& str)
 {
-	if (str.empty()) return std::wstring();
-	const int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], static_cast<int>(str.size()), nullptr, 0);
-	std::wstring result(size_needed, 0);
-	MultiByteToWideChar(CP_UTF8, 0, &str[0], static_cast<int>(str.size()), &result[0], size_needed);
-	return result;
+	return pf::utf8_to_utf16(str);
 }
 
 inline std::string to_utf8(const std::wstring& wstr)
 {
-	if (wstr.empty()) return std::string();
-	const int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], static_cast<int>(wstr.size()), nullptr, 0,
-	                                            nullptr, nullptr);
-	std::string result(size_needed, 0);
-	WideCharToMultiByte(CP_UTF8, 0, &wstr[0], static_cast<int>(wstr.size()), &result[0], size_needed, nullptr, nullptr);
-	return result;
+	return pf::utf16_to_utf8(wstr);
 }
 
 inline int clamp(const int v, const int l, const int r)
@@ -1303,41 +1283,7 @@ inline bool starts(const std::string& text, const char* with)
 
 inline std::string make_url(const std::string& url, const std::string& basepath)
 {
-	const auto wurl = to_utf16(url);
-	const auto wbase = to_utf16(basepath);
-	std::wstring wresult;
-
-	if (PathIsRelativeW(wurl.c_str()) && !PathIsURLW(wurl.c_str()))
-	{
-		WCHAR abs_url[512];
-		DWORD dl = 512;
-		UrlCombineW(wbase.c_str(), wurl.c_str(), abs_url, &dl, 0);
-		wresult = abs_url;
-	}
-	else
-	{
-		if (PathIsURLW(wurl.c_str()))
-		{
-			wresult = wurl;
-		}
-		else
-		{
-			WCHAR abs_url[512];
-			DWORD dl = 512;
-			UrlCreateFromPathW(wurl.c_str(), abs_url, &dl, 0);
-			wresult = abs_url;
-		}
-	}
-	auto result = to_utf8(wresult);
-	if (result.substr(0, 8) == "file:///")
-	{
-		result.erase(5, 1);
-	}
-	if (result.substr(0, 7) == "file://")
-	{
-		result.erase(0, 7);
-	}
-	return result;
+	return pf::resolve_url(basepath, url);
 }
 
 inline void transform_text(std::string& text, const text_transform tt)
@@ -1531,7 +1477,7 @@ public:
 		_selection.clear();
 	}
 
-	void draw(HDC hdc, const recti& rr) const;
+	void draw(pf::draw_context& dc, const recti& rr, pf::font_handle font) const;
 
 	void text(const std::string& s, const text_range selection)
 	{
@@ -1613,7 +1559,7 @@ int value_index(const std::string& val, const char* strings, int defValue = -1, 
 bool value_in_list(const std::string& val, const char* strings, char delim = ';');
 
 std::string::size_type find_close_bracket(const std::string& s, std::string::size_type off, char open_b = '(',
-                                           char close_b = ')');
+                                          char close_b = ')');
 
 
 std::vector<std::string> split_string(const std::string& str, char delim = ' ');
@@ -1772,9 +1718,9 @@ public:
 		case css_units_mm:
 			return value * 96.0f / 25.4f;
 		case css_units_vw:
-			return value * GetSystemMetrics(SM_CXSCREEN) / 100.0f;
+			return value * pf::platform_screen_size().cx / 100.0f;
 		case css_units_vh:
-			return value * GetSystemMetrics(SM_CYSCREEN) / 100.0f;
+			return value * pf::platform_screen_size().cy / 100.0f;
 		default:
 			return value;
 		}
@@ -2071,7 +2017,10 @@ struct css_position
 };
 
 
-extern HINSTANCE g_hInstance;
+inline std::string load_resource_html(const int id)
+{
+	return pf::platform_load_text_resource(id);
+}
 
 inline std::string get_file_contents(const std::string& file_name)
 {
@@ -2087,25 +2036,6 @@ inline std::string get_file_contents(const std::string& file_name)
 	}
 
 	return result;
-}
-
-inline std::string load_resource_html(const int id)
-{
-	const auto hrsrc = ::FindResource(g_hInstance, MAKEINTRESOURCE(id), RT_HTML);
-
-	if (hrsrc)
-	{
-		const auto hg = LoadResource(g_hInstance, hrsrc);
-
-		if (hg)
-		{
-			const auto data = static_cast<LPCSTR>(LockResource(hg));
-			const auto size = SizeofResource(g_hInstance, hrsrc);
-			return std::string(data, size);
-		}
-	}
-
-	return {};
 }
 
 class scope_locked_count
