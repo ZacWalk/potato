@@ -102,8 +102,8 @@ namespace
 			thumb_h = std::min(thumb_h, track_h);
 			const int max_scroll = std::max(0, _content_height - _viewport_h);
 			const int thumb_y = max_scroll == 0
-				? track.top
-				: track.top + mul_div(track_h - thumb_h, _scroll_y, max_scroll);
+				                    ? track.top
+				                    : track.top + mul_div(track_h - thumb_h, _scroll_y, max_scroll);
 			return pf::irect(track.left, thumb_y, track.right, thumb_y + thumb_h);
 		}
 
