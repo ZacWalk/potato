@@ -1,3 +1,6 @@
+// resource.h - Resource identifiers for icons, menus, accelerators, toolbar
+// buttons, and dialog controls used by the Win32 shell.
+
 //{{NO_DEPENDENCIES}}
 // Microsoft Visual C++ generated include file.
 // Used by Potato.rc

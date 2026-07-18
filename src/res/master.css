@@ -298,6 +298,130 @@ input, textarea, keygen, select, button, isindex {
     }
 
 
-article, aside, footer, header, hgroup, nav, section {
+article, aside, footer, header, hgroup, nav, section, main, figure, figcaption, details, summary {
     display: block;
+}
+
+figure {
+    margin: 1em 40px;
+}
+
+figcaption {
+    display: block;
+}
+
+main {
+    display: block;
+}
+
+mark {
+    background-color: yellow;
+    color: black;
+}
+
+small {
+    font-size: smaller;
+}
+
+s, strike, del {
+    text-decoration: line-through;
+}
+
+ins, u {
+    text-decoration: underline;
+}
+
+sub {
+    vertical-align: sub;
+    font-size: smaller;
+}
+
+sup {
+    vertical-align: super;
+    font-size: smaller;
+}
+
+abbr, acronym {
+    display: inline;
+}
+
+address {
+    display: block;
+    font-style: italic;
+}
+
+cite, dfn, var {
+    font-style: italic;
+}
+
+q:before {
+    content: open-quote;
+}
+
+q:after {
+    content: close-quote;
+}
+
+fieldset {
+    display: block;
+    margin: 0 2px;
+    padding: 0.35em 0.75em 0.625em;
+    border: 2px groove;
+}
+
+legend {
+    display: block;
+    padding: 0 2px;
+}
+
+summary {
+    display: block;
+}
+
+template, [hidden] {
+    display: none;
+}
+
+svg {
+    display: inline-block;
+    overflow: hidden;
+}
+
+wbr {
+    display: inline;
+}
+
+/* Wikipedia-specific: infobox and sidebar tables */
+table.infobox {
+    border: 1px solid #a2a9b1;
+    border-collapse: collapse;
+    margin: 0.5em 0 0.5em 1em;
+    padding: 0.2em;
+    float: right;
+    clear: right;
+}
+
+.mw-body, .mw-content-ltr {
+    line-height: 1.6;
+}
+
+.toc {
+    display: block;
+    border: 1px solid #a2a9b1;
+    background-color: #f8f9fa;
+    padding: 7px;
+}
+
+.navbox {
+    border: 1px solid #a2a9b1;
+    width: 100%;
+}
+
+.reflist {
+    font-size: 90%;
+}
+
+.mw-editsection {
+    font-size: small;
+    font-weight: normal;
 }

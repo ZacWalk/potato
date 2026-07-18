@@ -1,74 +1,38 @@
-// pch.h : include file for standard system include files,
-// or project specific include files that are used frequently, but
-// are changed infrequently
-//
+// pch.h - Precompiled header. Includes Windows SDK, GDI+, WinHTTP, STL headers,
+// and the core types header shared by all translation units.
 
 #pragma once
 
 #include "targetver.h"
 
-#define WIN32_LEAN_AND_MEAN    // Exclude rarely-used stuff from Windows headers
-// Windows Header Files:
-#include <windows.h>
-#include <stdint.h>
-
-#define _ATL_CSTRING_EXPLICIT_CONSTRUCTORS
-#define _ATL_NO_COM
-#define _ATL_NO_COM_SUPPORT
-#define _ATL_NO_PERF_SUPPORT
-#define _ATL_APARTMENT_THREADED
-#define _ATL_ALL_WARNINGS
-
-#include <atlbase.h>
-#include <atlstr.h>
-#include <atlwin.h>
-#include <AtlSync.h>
-
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #define ISOLATION_AWARE_ENABLED 1
 #define GDIPVER 0x0110
 
-
-
+#include <windows.h>
+#include <windowsx.h>
 #include <commctrl.h>
-#include <ctype.h>
-#include <functional>
-#include <gdiplus.h>
-#include <malloc.h>
-#include <math.h>
-#include <memory.h>
 #include <shlwapi.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <strsafe.h>
-#include <tchar.h>
 #include <winhttp.h>
-#include <winsock2.h>
-#include <assert.h>
-
-#undef min
-#undef max
+#include <gdiplus.h>
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <format>
 #include <fstream>
 #include <functional>
-#include <iomanip>
-#include <iostream>
-#include <locale>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
-#include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
-
-#include "types.h"
-#include "Geometry.h"
-
-
-
+#include "core.h"

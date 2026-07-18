@@ -1,0 +1,21 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build potato.sln (Debug x64)",
+            "type": "process",
+            "command": "msbuild",
+            "args": [
+                "${workspaceFolder}/potato.sln",
+                "/p:Configuration=Debug",
+                "/p:Platform=x64",
+                "/m"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$msCompile"
+        }
+    ]
+}

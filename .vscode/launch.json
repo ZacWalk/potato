@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch potato (Debug x64)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/exe/potato64d.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/exe",
+            "environment": [],
+            "preLaunchTask": "Build potato.sln (Debug x64)"
+        }
+    ]
+}

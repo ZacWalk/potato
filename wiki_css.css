@@ -1,0 +1,500 @@
+#p-lang .uls-settings-trigger{
+  background:transparent url(/w/extensions/UniversalLanguageSelector/resources/images/cog-sprite.svg?39d1e) no-repeat center top;
+  border:0;
+  min-height:16px;
+  min-width:16px;
+  float:right;
+  cursor:pointer
+}
+#p-lang .uls-settings-trigger::-moz-focus-inner{
+  border:0
+}
+#p-lang .uls-settings-trigger:focus{
+  outline:1px solid #36c
+}
+.skin-vector #p-lang .uls-settings-trigger{
+  margin-top:8px
+}
+#p-lang .uls-settings-trigger:hover{
+  background-position:center -16px
+}
+.client-nojs #ca-ve-edit,.ve-not-available #ca-ve-edit,.client-nojs .mw-editsection-divider,.ve-not-available .mw-editsection-divider,.client-nojs .mw-editsection-visualeditor,.ve-not-available .mw-editsection-visualeditor{
+  display:none
+}
+.client-js .mw-editsection-bracket:first-of-type{
+  margin-right:0.25em;
+  margin-inline:0 0.25em
+}
+.client-js .mw-editsection-bracket:not(:first-of-type){
+  margin-left:0.25em;
+  margin-inline:0.25em 0
+}
+body.skin-minerva .mw-parser-output .ambox,body.skin-minerva .mw-parser-output table.ambox{
+  display:block;
+  margin:0
+}
+.client-js body.skin-minerva .mw-parser-output .ambox{
+  cursor:pointer;
+  width:auto;
+  background:var(--background-color-interactive-subtle,#f8f9fa) !important;
+  color:var(--color-subtle,#54595d);
+  margin-bottom:1px
+}
+.client-js body.skin-minerva .mw-parser-output .ambox tbody{
+  display:table;
+  width:100%
+}
+.client-js body.skin-minerva .mw-parser-output .ambox .mbox-text-div,.client-js body.skin-minerva .mw-parser-output .ambox .mbox-text-span{
+  display:block;
+  max-height:3.3em;
+  height:3.3em;
+  overflow:hidden
+}
+.client-js body.skin-minerva .mw-parser-output .ambox div{
+  margin:0 !important;
+  padding:0 !important
+}
+.client-js body.skin-minerva .mw-parser-output .ambox td,.client-js body.skin-minerva .mw-parser-output .ambox div.mbox-text{
+  position:relative;
+  padding:8px 8px 8px 32px !important
+}
+.client-js body.skin-minerva .mw-parser-output .ambox td > div,.client-js body.skin-minerva .mw-parser-output .ambox div.mbox-text > div,.client-js body.skin-minerva .mw-parser-output .ambox td > span,.client-js body.skin-minerva .mw-parser-output .ambox div.mbox-text > span{
+  font-size:0.8125rem
+}
+.client-js body.skin-minerva .mw-parser-output .ambox b{
+  font-weight:inherit
+}
+.client-js body.skin-minerva .mw-parser-output .ambox a{
+  color:inherit !important;
+  -webkit-tap-highlight-color:rgba(0,0,0,0) !important
+}
+.client-js body.skin-minerva .mw-parser-output .ambox a:hover,.client-js body.skin-minerva .mw-parser-output .ambox a:focus{
+  text-decoration:none;
+  outline:inherit
+}
+.client-js body.skin-minerva .mw-parser-output .ambox small,.client-js body.skin-minerva .mw-parser-output .ambox .hide-when-compact,.client-js body.skin-minerva .mw-parser-output .ambox .mw-collapsible-content,.client-js body.skin-minerva .mw-parser-output .ambox .mbox-empty-cell,.client-js body.skin-minerva .mw-parser-output .ambox hr,.client-js body.skin-minerva .mw-parser-output .ambox .verbose,.client-js body.skin-minerva .mw-parser-output .ambox table,.client-js body.skin-minerva .mw-parser-output .ambox .mbox-image{
+  display:none
+}
+.client-js body.skin-minerva .mw-parser-output .ambox .minerva-ambox-icon{
+  position:absolute;
+  left:8px;
+  top:11px
+}
+.client-js body.skin-minerva .mw-parser-output .ambox .ambox-learn-more{
+  color:var(--color-progressive,#36c);
+  position:absolute;
+  right:8px;
+  bottom:8px;
+  z-index:0;
+  line-height:1.65
+}
+.client-js body.skin-minerva .mw-parser-output .ambox .ambox-learn-more::before{
+  content:'';
+  position:absolute;
+  z-index:-100;
+  bottom:0;
+  right:0;
+  width:100%;
+  height:100%;
+  box-sizing:content-box;
+  padding-left:4em;
+  background:linear-gradient(to right,transparent 0,var(--background-color-interactive-subtle,#f8f9fa) 3em)
+}
+@media screen and (min-width:640px){
+  .client-js body.skin-minerva .mw-parser-output .ambox .mbox-text-div,.client-js body.skin-minerva .mw-parser-output .ambox .mbox-text-span{
+  height:auto;
+  margin-bottom:24px !important
+}
+.client-js body.skin-minerva .mw-parser-output .ambox .ambox-learn-more{
+  left:32px;
+  right:0;
+  background:none
+}
+.client-js body.skin-minerva .mw-parser-output .ambox .ambox-learn-more::before{
+  top:-1.65em;
+  width:10px
+}
+
+}
+body.skin--responsive.skin-minerva .mw-parser-output .infobox{
+  float:none !important;
+  margin-left:0 !important;
+  margin-right:0 !important;
+  font-size:90%;
+  position:relative;
+  border:1px solid var(--border-color-muted,#dadde3);
+  margin-bottom:2em;
+  color:var(--color-base,#202122);
+  background-color:var(--background-color-interactive-subtle,#f8f9fa);
+  display:flex;
+  flex:1 1 100%;
+  flex-flow:column nowrap;
+  width:100% !important;
+  max-width:100% !important;
+  text-align:start
+}
+body.skin--responsive.skin-minerva .mw-parser-output .infobox caption{
+  padding:10px 10px 0;
+  text-align:center
+}
+body.skin--responsive.skin-minerva .mw-parser-output .infobox th,body.skin--responsive.skin-minerva .mw-parser-output .infobox td{
+  vertical-align:top;
+  border:0;
+  border-bottom:1px solid var(--border-color-muted,#dadde3);
+  padding:7px 10px
+}
+body.skin--responsive.skin-minerva .mw-parser-output .infobox tbody > tr > td,body.skin--responsive.skin-minerva .mw-parser-output .infobox tbody > tr > th{
+  flex:1 0
+}
+body.skin--responsive.skin-minerva .mw-parser-output .infobox td:only-child,body.skin--responsive.skin-minerva .mw-parser-output .infobox th:only-child{
+  width:100%
+}
+body.skin--responsive.skin-minerva .mw-parser-output .infobox tr:last-child th,body.skin--responsive.skin-minerva .mw-parser-output .infobox tr:last-child td{
+  border:0
+}
+body.skin--responsive.skin-minerva .mw-parser-output .infobox > tbody,body.skin--responsive.skin-minerva .mw-parser-output .infobox > caption{
+  display:flex;
+  flex-flow:column nowrap
+}
+body.skin--responsive.skin-minerva .mw-parser-output .infobox > tbody > tr{
+  min-width:100%;
+  display:flex;
+  flex-flow:row nowrap
+}
+@media all and (min-width:640px){
+  body.skin-minerva.skin--responsive .mw-parser-output .infobox{
+  margin:0.5em 0 1em 35px !important;
+  max-width:320px !important;
+  width:auto !important;
+  float:right !important;
+  clear:right !important
+}
+
+}
+body.skin--responsive.skin-minerva .mw-parser-output .hatnote,body.skin--responsive.skin-minerva .mw-parser-output .dablink,body.skin--responsive.skin-minerva .mw-parser-output .rellink{
+  padding:5px 7px;
+  color:var(--color-subtle,#54595d);
+  font-size:0.8125rem;
+  background-color:var(--background-color-interactive-subtle,#f8f9fa);
+  margin-bottom:1px;
+  overflow:hidden
+}
+[bgcolor]{
+  color:#333
+}
+@media screen{
+  html.skin-theme-clientpref-night{
+  
+}
+html.skin-theme-clientpref-night .hatnote:not(.notheme),html.skin-theme-clientpref-night .dablink:not(.notheme),html.skin-theme-clientpref-night .rellink:not(.notheme),html.skin-theme-clientpref-night .infobox:not(.notheme){
+  color:var(--color-base,#202122) !important;
+  background-color:var(--background-color-interactive-subtle,#f8f9fa) !important
+}
+html.skin-theme-clientpref-night .infobox td:not(.notheme),html.skin-theme-clientpref-night .infobox th:not(.notheme),html.skin-theme-clientpref-night .infobox-above:not(.notheme),html.skin-theme-clientpref-night .infobox p:not(.notheme),html.skin-theme-clientpref-night .infobox > div:not(.notheme),html.skin-theme-clientpref-night .infobox caption:not(.notheme),html.skin-theme-clientpref-night .infobox--frwiki td:not(.notheme),html.skin-theme-clientpref-night .infobox--frwiki th:not(.notheme),html.skin-theme-clientpref-night .infobox--frwiki p:not(.notheme),html.skin-theme-clientpref-night .infobox--frwiki > div:not(.notheme),html.skin-theme-clientpref-night .infobox--frwiki caption:not(.notheme),html.skin-theme-clientpref-night .sinottico th:not(.notheme),html.skin-theme-clientpref-night .infobox-header:not(.notheme),html.skin-theme-clientpref-night .skin-nightmode-reset-color:not(.notheme),html.skin-theme-clientpref-night .navigation-box:not(.notheme),html.skin-theme-clientpref-night .metadata:not(.notheme),html.skin-theme-clientpref-night .quotebox:not(.notheme),html.skin-theme-clientpref-night .side-box:not(.notheme),html.skin-theme-clientpref-night .side-box div:not(.notheme),html.skin-theme-clientpref-night .navbox:not(.notheme),html.skin-theme-clientpref-night .navbox-subgroup:not(.notheme),html.skin-theme-clientpref-night .navbox-group:not(.notheme),html.skin-theme-clientpref-night .navbox-even:not(.notheme),html.skin-theme-clientpref-night .navbox-abovebelow:not(.notheme),html.skin-theme-clientpref-night .navbox-title:not(.notheme){
+  background:inherit !important;
+  color:inherit !important;
+  border-color:var(--border-color-subtle,#c8ccd1) !important
+}
+html.skin-theme-clientpref-night .mw-parser-output [style*='background']{
+  color:#202122
+}
+html.skin-theme-clientpref-night body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) [bgcolor] a:not(.mw-selflink),html.skin-theme-clientpref-night body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox)[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a:not(.mw-selflink),html.skin-theme-clientpref-night body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) th[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a:not(.mw-selflink),html.skin-theme-clientpref-night body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) td[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a:not(.mw-selflink),html.skin-theme-clientpref-night body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) tr[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) td a:not(.mw-selflink){
+  color:var(--color-base-fixed,#202122);
+  text-decoration:underline
+}
+html.skin-theme-clientpref-night body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) [bgcolor] a.new,html.skin-theme-clientpref-night body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox)[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a.new,html.skin-theme-clientpref-night body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) th[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a.new,html.skin-theme-clientpref-night body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) td[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a.new,html.skin-theme-clientpref-night body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) tr[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) td a.new{
+  text-decoration-style:wavy
+}
+
+}
+@media screen and (prefers-color-scheme:dark){
+  html.skin-theme-clientpref-os{
+  
+}
+html.skin-theme-clientpref-os .infobox td:not(.notheme),html.skin-theme-clientpref-os .infobox th:not(.notheme),html.skin-theme-clientpref-os .infobox-above:not(.notheme),html.skin-theme-clientpref-os .infobox p:not(.notheme),html.skin-theme-clientpref-os .infobox > div:not(.notheme),html.skin-theme-clientpref-os .infobox caption:not(.notheme),html.skin-theme-clientpref-os .infobox--frwiki td:not(.notheme),html.skin-theme-clientpref-os .infobox--frwiki th:not(.notheme),html.skin-theme-clientpref-os .infobox--frwiki p:not(.notheme),html.skin-theme-clientpref-os .infobox--frwiki > div:not(.notheme),html.skin-theme-clientpref-os .infobox--frwiki caption:not(.notheme),html.skin-theme-clientpref-os .sinottico th:not(.notheme),html.skin-theme-clientpref-os .infobox-header:not(.notheme),html.skin-theme-clientpref-os .skin-nightmode-reset-color:not(.notheme),html.skin-theme-clientpref-os .navigation-box:not(.notheme),html.skin-theme-clientpref-os .metadata:not(.notheme),html.skin-theme-clientpref-os .quotebox:not(.notheme),html.skin-theme-clientpref-os .side-box:not(.notheme),html.skin-theme-clientpref-os .side-box div:not(.notheme),html.skin-theme-clientpref-os .navbox:not(.notheme),html.skin-theme-clientpref-os .navbox-subgroup:not(.notheme),html.skin-theme-clientpref-os .navbox-group:not(.notheme),html.skin-theme-clientpref-os .navbox-even:not(.notheme),html.skin-theme-clientpref-os .navbox-abovebelow:not(.notheme),html.skin-theme-clientpref-os .navbox-title:not(.notheme){
+  background:inherit !important;
+  color:inherit !important;
+  border-color:var(--border-color-subtle,#c8ccd1) !important
+}
+html.skin-theme-clientpref-os .hatnote:not(.notheme),html.skin-theme-clientpref-os .dablink:not(.notheme),html.skin-theme-clientpref-os .rellink:not(.notheme),html.skin-theme-clientpref-os .infobox:not(.notheme){
+  color:var(--color-base,#202122) !important;
+  background-color:var(--background-color-interactive-subtle,#f8f9fa) !important
+}
+html.skin-theme-clientpref-os .mw-parser-output [style*='background']{
+  color:#202122
+}
+html.skin-theme-clientpref-os body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) [bgcolor] a:not(.mw-selflink),html.skin-theme-clientpref-os body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox)[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a:not(.mw-selflink),html.skin-theme-clientpref-os body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) th[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a:not(.mw-selflink),html.skin-theme-clientpref-os body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) td[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a:not(.mw-selflink),html.skin-theme-clientpref-os body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) tr[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) td a:not(.mw-selflink){
+  color:var(--color-base-fixed,#202122);
+  text-decoration:underline
+}
+html.skin-theme-clientpref-os body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) [bgcolor] a.new,html.skin-theme-clientpref-os body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox)[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a.new,html.skin-theme-clientpref-os body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) th[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a.new,html.skin-theme-clientpref-os body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) td[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) a.new,html.skin-theme-clientpref-os body.ns-0:not(.page-Main_Page) .mw-parser-output table:not(.infobox):not(.navbox-inner):not(.navbox) tr[style*="background"]:not([style*="transparent"]):not([style*="inherit"]) td a.new{
+  text-decoration-style:wavy
+}
+
+}
+@media screen{
+  .skin-theme-clientpref-night .ns-100 .mw-parser-output :not(.notheme):not(a){
+  background:inherit !important;
+  color:inherit !important;
+  border-color:var(--border-color-subtle,#c8ccd1) !important
+}
+
+}
+@media screen and (prefers-color-scheme:dark){
+  .skin-theme-clientpref-os .ns-100 .mw-parser-output :not(.notheme):not(a){
+  background:inherit !important;
+  color:inherit !important;
+  border-color:var(--border-color-subtle,#c8ccd1) !important
+}
+
+}
+.vector-icon.mw-ui-icon-wikimedia-bell{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=bell&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=bell&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-bell-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=bell&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=bell&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-bell-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=bell&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=bell&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-tray{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=tray&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=tray&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-tray-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=tray&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=tray&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-tray-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=tray&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=tray&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-labFlask{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=labFlask&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=labFlask&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-labFlask-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=labFlask&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=labFlask&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-labFlask-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=labFlask&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=labFlask&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-language{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=language&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=language&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-language-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=language&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=language&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-language-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=language&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=language&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-sandbox{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=sandbox&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=sandbox&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-sandbox-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=sandbox&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=sandbox&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-sandbox-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=sandbox&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=sandbox&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-listBullet{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=listBullet&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=listBullet&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-listBullet-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=listBullet&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=listBullet&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-listBullet-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=listBullet&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=listBullet&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-close{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=close&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=close&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-close-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=close&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=close&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-close-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=close&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=close&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-ellipsis{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=ellipsis&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=ellipsis&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-ellipsis-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=ellipsis&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=ellipsis&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-ellipsis-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=ellipsis&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=ellipsis&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-heart{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=heart&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=heart&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-heart-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=heart&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=heart&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-heart-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=heart&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=heart&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-logIn{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logIn&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logIn&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-logIn-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logIn&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logIn&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-logIn-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logIn&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logIn&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-logOut{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logOut&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logOut&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-logOut-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logOut&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logOut&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-logOut-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logOut&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=logOut&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-search{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=search&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=search&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-search-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=search&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=search&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-search-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=search&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=search&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-settings{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=settings&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=settings&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-settings-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=settings&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=settings&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-settings-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=settings&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=settings&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-menu{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=menu&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=menu&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-menu-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=menu&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=menu&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-menu-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=menu&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=menu&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-imageGallery{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=imageGallery&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=imageGallery&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-imageGallery-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=imageGallery&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=imageGallery&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-imageGallery-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=imageGallery&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=imageGallery&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-star{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=star&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=star&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-star-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=star&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=star&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-star-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=star&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=star&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-halfStar{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=halfStar&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=halfStar&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-halfStar-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=halfStar&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=halfStar&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-halfStar-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=halfStar&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=halfStar&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-unStar{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=unStar&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=unStar&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-unStar-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=unStar&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=unStar&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-unStar-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=unStar&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=unStar&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-userAdd{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAdd&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAdd&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-userAdd-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAdd&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAdd&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-userAdd-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAdd&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAdd&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-userAvatar{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAvatar&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAvatar&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-userAvatar-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAvatar&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAvatar&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-userAvatar-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAvatar&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userAvatar&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-userContributions{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userContributions&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userContributions&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-userContributions-invert{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userContributions&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib);
+  mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userContributions&variant=invert&format=original&lang=en&skin=vector-2022&version=1boib)
+}
+.vector-icon.mw-ui-icon-wikimedia-userContributions-progressive{
+  -webkit-mask-image:url(https://en.wikipedia.org/w/load.php?modules=skins.vector.icons&image=userContributions&variant=progressive&format=original&lang=en&skin=vector-2022&version=1boib);
