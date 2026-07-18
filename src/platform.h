@@ -773,7 +773,7 @@ namespace pf
 
 	// Cursor shapes
 	//
-	enum class cursor_shape { arrow, ibeam, size_we, size_ns };
+	enum class cursor_shape { arrow, ibeam, size_we, size_ns, hand, wait };
 
 	// Window style flags
 	//
@@ -861,13 +861,67 @@ namespace pf
 		consolas,
 		arial,
 		calibri,
+		segoe_icons, // Segoe Fluent Icons / Segoe MDL2 Assets — for icon glyphs
 	};
+
+	// Standard icon glyph code points for use with font_name::segoe_icons.
+	// Values match Segoe Fluent Icons / Segoe MDL2 Assets so the same
+	// codepoints work on both fonts.
+	namespace icon_glyph
+	{
+		constexpr uint32_t back = 0xE72B;
+		constexpr uint32_t forward = 0xE72A;
+		constexpr uint32_t refresh = 0xE72C;
+		constexpr uint32_t stop = 0xE711;
+		constexpr uint32_t home = 0xE80F;
+		constexpr uint32_t menu = 0xE700;
+		constexpr uint32_t search = 0xE721;
+		constexpr uint32_t settings = 0xE713;
+		constexpr uint32_t cancel = 0xE10A;
+	}
 
 	struct font
 	{
 		int size = 12; // in points
 		font_name name;
 	};
+
+	// Opaque platform font handle. On Win32 this stores an HFONT cast to
+	// uintptr_t. Created via create_font_handle, freed via delete_font_handle.
+	using font_handle = uintptr_t;
+
+	// Font metrics returned alongside a created font.
+	struct font_metrics_data
+	{
+		int height = 0;
+		int ascent = 0;
+		int descent = 0;
+		int x_height = 0;
+		int avg_char_width = 0;
+	};
+
+	struct font_def
+	{
+		std::string face;
+		int size = 12; // in points
+		int weight = 400; // 100..900
+		bool italic = false;
+		bool underline = false;
+		bool strikeout = false;
+	};
+
+	// Create / destroy a platform font. Created handles are NOT cached by
+	// the platform; the caller is responsible for caching and lifetime.
+	font_handle create_font_handle(const font_def& def, font_metrics_data* out_metrics = nullptr);
+	void delete_font_handle(font_handle h);
+
+	// Measure text or font line height using a previously created handle.
+	isize measure_text_with_font(font_handle h, std::string_view text);
+	int line_height_for_font(font_handle h);
+
+	// Resolve a (possibly relative) URL against an absolute base URL.
+	// Mirrors the previous shlwapi-based behaviour.
+	std::string resolve_url(std::string_view base, std::string_view rel);
 
 
 	// Measure / Draw contexts
@@ -895,15 +949,52 @@ namespace pf
 		                       const font& f, color_t text_color, color_t bg_color) = 0;
 		virtual isize measure_text(std::string_view text, const font& f) const = 0;
 
+		// Text output using a cached platform font handle (see create_font_handle).
+		// Always draws with a transparent background; fill the background separately
+		// with fill_solid_rect if needed.
+		virtual void draw_text_h(int x, int y, std::string_view text,
+		                         font_handle handle, color_t text_color) = 0;
+		virtual isize measure_text_h(std::string_view text, font_handle handle) const = 0;
+
 		// Line drawing
 		virtual void draw_lines(std::span<const ipoint> points, color_t color) = 0;
+
+		// Solid-color line segment (logical pixel coords). Width is integer pixels.
+		virtual void draw_solid_line(ipoint a, ipoint b, color_t color, int width = 1) = 0;
+
+		// Outlined / filled ellipse fitting the bounding rect (x,y,w,h).
+		virtual void draw_ellipse(int x, int y, int w, int h, color_t color, int line_width = 1) = 0;
+		virtual void fill_ellipse(int x, int y, int w, int h, color_t color) = 0;
+
+		// Push a clip rectangle. Subsequent draws will be clipped to this rect
+		// in addition to clip_rect(). Pair with clear_clip_rect.
+		virtual void set_clip_rect(const irect& rc) = 0;
+		virtual void clear_clip_rect() = 0;
+
+		// Bitmap blit (top-left at x,y, no scaling). The bitmap is drawn via the
+		// platform's fast path (StretchDIBits/SetDIBitsToDevice on Win32).
+		virtual void draw_bitmap(int x, int y, const struct bitmap& bmp) = 0;
+
+		// Bitmap blit with scaling into dest rectangle.
+		virtual void draw_bitmap(const irect& dest, const struct bitmap& bmp) = 0;
 	};
+
+	// Wrap a native device context (HDC on Win32) into a transient draw_context.
+	// The returned context does NOT own the native DC. Use this in window-paint
+	// handlers that already have an HDC from BeginPaint.
+	std::unique_ptr<draw_context> wrap_native_dc(uintptr_t native_dc, const irect& clip);
+
+	// Wrap a native device context for measuring only.
+	std::unique_ptr<measure_context> wrap_native_dc_measure(uintptr_t native_dc);
 
 	struct frame_reactor;
 	struct window_frame;
+	struct toolbar_frame;
+	struct address_bar_config;
 
 	using window_frame_ptr = std::shared_ptr<window_frame>;
 	using frame_reactor_ptr = std::shared_ptr<frame_reactor>;
+	using toolbar_frame_ptr = std::shared_ptr<toolbar_frame>;
 
 	// window_frame — Platform-independent window abstraction
 	struct window_frame
@@ -969,6 +1060,11 @@ namespace pf
 		virtual double get_dpi_scale() const = 0;
 		// Drag and drop
 		virtual void accept_drop_files(bool accept) = 0;
+
+		// Create a platform-rendered toolbar / address bar child window.
+		// The returned toolbar_frame is itself a window_frame (see toolbar_frame::frame())
+		// so its bounds can be positioned via move_window().
+		virtual toolbar_frame_ptr create_address_bar(const address_bar_config& cfg) = 0;
 	};
 
 	// frame_reactor — Event handler for window_frame
@@ -996,6 +1092,15 @@ namespace pf
 
 	// Cursor position (global, not window-specific)
 	ipoint platform_cursor_pos();
+
+	// Primary screen size in pixels
+	isize platform_screen_size();
+
+	// Primary screen DPI (logical pixels per inch). Returns 96 if unknown.
+	int platform_screen_dpi();
+
+	// Load an embedded text resource (e.g. master.css). Returns empty on failure.
+	std::string platform_load_text_resource(int id);
 
 	// Dialog / Message box constants
 	namespace dialog_id
@@ -1205,6 +1310,167 @@ namespace pf
 	web_host_ptr connect_to_host(std::string_view host, bool secure = true, int port = 0,
 	                             std::string_view user_agent = {});
 	web_response send_request(const web_host_ptr& host, const web_request& req);
+
+	// ── Bitmap (WIC-backed) ──────────────────────────────────────────────────
+	//
+	// A device-independent 32-bit BGRA bitmap, top-down. Loaded via WIC on
+	// Windows so any image format installed on the system (PNG, JPEG, GIF,
+	// BMP, TIFF, ICO, etc.) is supported. Drawn via SetDIBitsToDevice /
+	// StretchDIBits in draw_context::draw_bitmap.
+	struct bitmap : bitmap_data
+	{
+		bitmap() = default;
+
+		bitmap(int w, int h, std::vector<uint32_t> px)
+		{
+			width = w;
+			height = h;
+			pixels = std::move(px);
+		}
+
+		[[nodiscard]] bool empty() const { return pixels.empty(); }
+	};
+
+	using bitmap_ptr = std::shared_ptr<bitmap>;
+
+	// Load a bitmap from a file on disk.
+	bitmap_ptr load_bitmap_file(const file_path& path);
+
+	// Load a bitmap from in-memory encoded image bytes.
+	bitmap_ptr load_bitmap_memory(const uint8_t* data, size_t size);
+
+	// Load an encoded image from an embedded resource (RT_RCDATA by default).
+	bitmap_ptr load_bitmap_named_resource(std::string_view name, std::string_view type = "RCDATA");
+
+	// ── Async HTTP ────────────────────────────────────────────────────────────
+	//
+	// A platform async HTTP client. Callbacks are dispatched from a background
+	// thread; marshal to the UI thread with run_ui() if necessary. Cancel a
+	// request by calling cancel() on the returned handle; a cancelled request
+	// will not invoke any further callbacks.
+	struct async_http_callbacks
+	{
+		// Called once after headers are received. status_code is HTTP status.
+		std::function<void(int status_code, std::string content_type, uint64_t content_length)> on_headers;
+		// Called for each chunk of body data.
+		std::function<void(const uint8_t* data, size_t size)> on_data;
+		// Called once after the body has been fully received.
+		std::function<void()> on_complete;
+		// Called once on error. on_complete will not be called.
+		std::function<void(std::string error)> on_error;
+	};
+
+	struct async_http_request
+	{
+		virtual ~async_http_request() = default;
+		// Cancel the request. Callbacks will no longer fire after cancel returns.
+		virtual void cancel() = 0;
+	};
+
+	using async_http_request_ptr = std::shared_ptr<async_http_request>;
+
+	struct async_http_session
+	{
+		virtual ~async_http_session() = default;
+		// Issue a GET for the given absolute URL (http or https).
+		virtual async_http_request_ptr get(std::string_view url, async_http_callbacks cb) = 0;
+		// Cancel all in-flight requests issued from this session.
+		virtual void stop() = 0;
+	};
+
+	using async_http_session_ptr = std::shared_ptr<async_http_session>;
+
+	// Create a new async HTTP session. user_agent is sent with every request.
+	async_http_session_ptr create_async_http_session(std::string_view user_agent = {});
+
+	// ── Toolbar / Address bar ─────────────────────────────────────────────────
+	//
+	// Platform-rendered toolbar widget. Two styles are supported:
+	//   - menu        : a row of icon-font buttons (no edit field)
+	//   - address_bar : icon-font buttons on either side with an editable URL
+	//                   field in the middle (browser-style)
+	//
+	// Buttons are described declaratively. The icon is a code point in
+	// font_name::segoe_icons (see icon_glyph for the standard set).
+	enum class toolbar_style
+	{
+		menu,
+		address_bar,
+	};
+
+	struct toolbar_button
+	{
+		uint32_t glyph = 0; // codepoint in icon font
+		int id = 0; // app-defined identifier (passed to set_button_enabled)
+		std::string tooltip;
+		std::function<void()> action;
+		std::function<bool()> is_enabled;
+	};
+
+	struct address_bar_config
+	{
+		toolbar_style style = toolbar_style::address_bar;
+
+		std::vector<toolbar_button> left_buttons;
+		std::vector<toolbar_button> right_buttons;
+
+		// Fired when the user activates the address (presses Enter).
+		std::function<void(std::string url)> on_navigate;
+
+		// Optional. Called as the user types, on the UI thread. Returns
+		// suggestions to show in the dropdown.
+		std::function<std::vector<std::string>(std::string_view text)> on_suggest;
+
+		// Optional initial URL.
+		std::string initial_text;
+
+		// Visual styling. Defaults are reasonable.
+		color_t background = color_t(255, 255, 255);
+		color_t edit_background = color_t(245, 245, 245);
+		color_t text_color = color_t(0, 0, 0);
+		color_t button_color = color_t(64, 64, 64);
+		color_t button_hover = color_t(220, 220, 220);
+		color_t border_color = color_t(200, 200, 200);
+
+		int height = 54; // dialog units (scaled by DPI on use)
+		int button_width = 54;
+	};
+
+	struct toolbar_frame
+	{
+		virtual ~toolbar_frame() = default;
+
+		// Underlying window — use this for layout (move_window, etc.).
+		virtual window_frame_ptr frame() = 0;
+
+		// Preferred height in pixels.
+		virtual int preferred_height() const = 0;
+
+		// Address-bar text accessors (no-op for toolbar_style::menu).
+		virtual void set_address_text(std::string_view text) = 0;
+		[[nodiscard]] virtual std::string address_text() const = 0;
+		virtual void focus_address() = 0;
+		virtual void select_all_address() = 0;
+
+		// Enable/disable a button by its declared id.
+		virtual void set_button_enabled(int id, bool enabled) = 0;
+
+		// Replace a button's glyph (e.g. swap refresh ⇄ stop while loading).
+		virtual void set_button_glyph(int id, uint32_t glyph) = 0;
+
+		// Attach a popup menu to a button (e.g. a "burger" / hamburger
+		// menu). When the button is clicked, the menu is shown beneath it
+		// and the button's own action callback is NOT invoked. Pass an
+		// empty vector to detach the menu and restore action behaviour.
+		virtual void set_menu(int button_id, std::vector<menu_command> items) = 0;
+	};
+
+	// Create an address-bar / toolbar widget as a child of an existing native
+	// window (HWND on Win32, passed as uintptr_t). Use this when the parent
+	// window is not yet a pf::window_frame. Returns a toolbar_frame whose
+	// frame()->m_hWnd (Win32) lives inside the given parent.
+	toolbar_frame_ptr create_address_bar_for_hwnd(uintptr_t parent_native_handle,
+	                                              const address_bar_config& cfg);
 }
 
 struct app_init_result

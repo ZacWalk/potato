@@ -3,87 +3,65 @@
 // manages fonts and stylesheets.
 
 #pragma once
+#include "platform.h"
 #include "core.h"
 #include "element.h"
 
 
 class document;
 
-// Async WinHTTP request. Lifetime extended via shared_ptr held in http::m_requests
-// from the moment the request is registered until WinHTTP fires HANDLE_CLOSING.
+// File-callback wrapper. Each request downloads to a temp file and then
+// invokes a single completion callback with (file_path, error_code, http_status, url).
+// The implementation rides on top of pf::async_http_session.
 class http_request : public std::enable_shared_from_this<http_request>
 {
-	friend class http;
-
 public:
-	using callback_t = std::function<void(const std::string& file, DWORD error, DWORD httpStatus,
+	using callback_t = std::function<void(const std::string& file, uint32_t error, uint32_t httpStatus,
 	                                      const std::string& url)>;
 
-protected:
-	http* m_http = nullptr;
-	HINTERNET m_hConnection = nullptr;
-	HINTERNET m_hRequest = nullptr;
-	std::mutex m_handle_mutex;       // protects m_hRequest/m_hConnection
-	BYTE m_buffer[8192]{};
-	DWORD m_error = 0;
-	ULONG64 m_content_length = 0;
-	ULONG64 m_downloaded_length = 0;
-	DWORD m_status = 0;
-	std::string m_url;
-	std::string m_file;
-	HANDLE m_hFile = INVALID_HANDLE_VALUE;
-	std::atomic<bool> m_finished{false};
+	explicit http_request(callback_t callback) : m_callback(std::move(callback))
+	{
+	}
+
+	~http_request() = default;
+
+	void cancel()
+	{
+		std::lock_guard lk(m_mutex);
+		if (m_async) m_async->cancel();
+	}
+
+	// Internal — set by http when the request is launched.
+	void set_async(pf::async_http_request_ptr a)
+	{
+		std::lock_guard lk(m_mutex);
+		m_async = std::move(a);
+	}
+
 	callback_t m_callback;
-
-public:
-	explicit http_request(callback_t callback);
-	virtual ~http_request();
-
-	void on_finish(DWORD dwError, LPCWSTR errMsg);
-	void on_data(LPCBYTE data, DWORD len, ULONG64 downloaded, ULONG64 total);
-	void on_headers_ready(HINTERNET hRequest);
-
-	bool create(const std::string& url, HINTERNET hSession);
-	void cancel();
-
-protected:
-	DWORD on_send_request_complete();
-	DWORD on_headers_available();
-	DWORD on_handle_closing();
-	DWORD on_request_error(DWORD dwError);
-	DWORD on_read_complete(DWORD len);
-	DWORD read_data();
-	void set_parent(http* parent) { m_http = parent; }
+	std::mutex m_mutex;
+	pf::async_http_request_ptr m_async;
 };
 
+// Async HTTP — owns a pf::async_http_session and tracks in-flight requests
+// so they can be cancelled together at shutdown.
 class http
 {
-	friend class http_request;
-
-	HINTERNET m_hSession = nullptr;
-	std::vector<std::shared_ptr<http_request>> m_requests;
+	pf::async_http_session_ptr m_session;
 	std::mutex m_mutex;
-	DWORD m_max_connections_per_server = 6;
+	std::vector<std::shared_ptr<http_request>> m_requests;
 
 public:
 	http() = default;
-	~http();
+	~http() { close(); }
 
 	http(const http&) = delete;
 	http& operator=(const http&) = delete;
 
-	void set_max_connections_per_server(const DWORD n) { m_max_connections_per_server = n; }
-	bool open(LPCWSTR pwszUserAgent, DWORD dwAccessType, LPCWSTR pwszProxyName, LPCWSTR pwszProxyBypass);
+	bool open(std::string_view user_agent);
 	bool download_file(const std::string& url, const std::shared_ptr<http_request>& request);
 	void stop();
 	void close();
-
-private:
-	static VOID CALLBACK http_callback(HINTERNET hInternet, DWORD_PTR dwContext, DWORD dwInternetStatus,
-	                                   LPVOID lpvStatusInformation, DWORD dwStatusInformationLength);
-
-protected:
-	void remove_request(const std::shared_ptr<http_request>& request);
 };
 
 
@@ -447,7 +425,7 @@ private: /* methods */
 		if (is_equal(buf_ch, "apos")) return '\'';
 		if (is_equal(buf_ch, "quot")) return '\"';
 
-		const wchar_t entity = resolve_entity(buf_ch.c_str(), i);
+		const wchar_t entity = resolve_entity(buf_ch.c_str(), static_cast<int>(buf_ch.size()));
 
 		if (entity)
 		{
@@ -686,7 +664,6 @@ private: /* methods */
 
 
 class render_win32;
-class html_view;
 class element;
 
 
@@ -705,7 +682,7 @@ struct omitted_end_tags_t
 
 class document : public std::enable_shared_from_this<document>
 {
-	html_view& m_view;
+	view_host& m_view;
 
 	std::shared_ptr<element> m_root;
 	std::map<std::string, font_item, ltstr> m_fonts;
@@ -725,18 +702,18 @@ class document : public std::enable_shared_from_this<document>
 	std::string m_cursor;
 	std::string m_base_path;
 
-	std::map<std::string, std::shared_ptr<Gdiplus::Bitmap>, ltstr> m_images;
+	std::map<std::string, pf::bitmap_ptr, ltstr> m_images;
 
 public:
 	std::unique_ptr<element> m_parsed_root;
 
-	document(html_view& view);
+	document(view_host& view);
 	~document();
 
 	void clear();
 	void load_master_stylesheet(const std::string& str);
-	HFONT get_font(const std::string& name, int size, const std::string& weight, const std::string& style,
-	               const std::string& decoration, font_metrics* fm);
+	pf::font_handle get_font(const std::string& name, int size, const std::string& weight, const std::string& style,
+	                         const std::string& decoration, font_metrics* fm);
 	int render(render_win32& renderer, int max_width, render_type rt = render_all);
 	void draw(render_win32& renderer, int x, int y, const position* clip);
 
@@ -767,14 +744,15 @@ public:
 	void import_css(const std::string& url, const std::string& baseurl, const std::string& media = empty);
 	void on_anchor_click(const std::string& url, element* el);
 	void set_cursor(const std::string& cursor);
+	const std::string& cursor() const { return m_cursor; }
 
 	bool is_image_cached(const std::string& src, const std::string& baseurl);
 	void load_image(const std::string& url, const std::string& base);
-	std::shared_ptr<Gdiplus::Bitmap> find_image(const std::string& url);
-	std::shared_ptr<Gdiplus::Bitmap> find_image(const std::string& url, const std::string& base);
+	pf::bitmap_ptr find_image(const std::string& url);
+	pf::bitmap_ptr find_image(const std::string& url, const std::string& base);
 
-	int text_width(const std::string& text, HFONT hFont);
-	void delete_font(HFONT hFont);
+	int text_width(const std::string& text, pf::font_handle hFont);
+	void delete_font(pf::font_handle hFont);
 
 
 	position client_pos() const { return m_client_pos; };
@@ -796,13 +774,13 @@ public:
 	void finalize();
 	void add_stylesheet(const std::string& text, const std::string& baseurl, const std::string& media);
 
-	static std::shared_ptr<document> create_from_utf16(html_view& view, const std::string& url,
+	static std::shared_ptr<document> create_from_utf16(view_host& view, const std::string& url,
 	                                                   const std::string& str);
-	static std::shared_ptr<document> create_from_utf8(html_view& view, const std::string& url, const std::string& str);
+	static std::shared_ptr<document> create_from_utf8(view_host& view, const std::string& url, const std::string& str);
 
 	static std::shared_ptr<document>
-	parse_from_utf16(html_view& view, const std::string& url, const std::string& str);
-	static std::shared_ptr<document> parse_from_utf8(html_view& view, const std::string& url, const std::string& str);
+	parse_from_utf16(view_host& view, const std::string& url, const std::string& str);
+	static std::shared_ptr<document> parse_from_utf8(view_host& view, const std::string& url, const std::string& str);
 
 	friend class html_view;
 
@@ -810,8 +788,8 @@ private:
 	element* add_root();
 	element* add_body();
 
-	HFONT add_font(const std::string& name, int size, const std::string& weight, const std::string& style,
-	               const std::string& decoration, font_metrics* fm);
+	pf::font_handle add_font(const std::string& name, int size, const std::string& weight, const std::string& style,
+	                         const std::string& decoration, font_metrics* fm);
 
 	bool update_media_lists(const media_features& features);
 	void update_styles(element* root_el);

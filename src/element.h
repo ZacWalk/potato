@@ -382,7 +382,7 @@ protected:
 	box* m_box;
 	std::vector<std::unique_ptr<box>> m_boxes;
 
-	HFONT m_font;
+	pf::font_handle m_font;
 	int m_font_size;
 	font_metrics m_font_metrics;
 
@@ -470,7 +470,7 @@ public:
 	margins get_margins() const;
 	margins get_paddings() const;
 	position get_placement() const;
-	HFONT get_font(font_metrics* fm = nullptr);
+	pf::font_handle get_font(font_metrics* fm = nullptr);
 	background* get_background(bool own_only = false);
 
 	bool append_child(std::unique_ptr<element> el);
@@ -502,7 +502,7 @@ public:
 	const std::string get_attr(const std::string& name, const std::string& def = empty) const;
 	const std::string get_cursor() const;
 	const std::string get_style_property(const std::string& name, bool inherited,
-	                                      const std::string& def = empty) const;
+	                                     const std::string& def = empty) const;
 	const std::string get_text() const;
 	css_length get_css_bottom() const;
 	css_length get_css_height() const;
@@ -591,8 +591,6 @@ protected:
 	element* get_element_before();
 	element* get_element_after();
 };
-
-
 
 
 class element_zindex_sort

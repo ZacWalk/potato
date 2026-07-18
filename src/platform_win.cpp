@@ -1,15 +1,25 @@
-// platform_win.cpp — Win32 platform layer: entry point, windowing, timers,
+﻿// platform_win.cpp â€” Win32 platform layer: entry point, windowing, timers,
 // resources, menus, device context, file dialogs, and spell checking
 
 #include "pch.h"
 
-// Windows Header Files:
+#define WIN32_LEAN_AND_MEAN
+#define ISOLATION_AWARE_ENABLED 1
 #define NOMINMAX
 #include <windows.h>
+#include <commdlg.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <shlwapi.h>
 #include <spellcheck.h>
 #include <WinInet.h>
 
+#include <iostream>
+
 #pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "shlwapi.lib")
 
 #include <functional>
 #include <map>
@@ -18,12 +28,55 @@
 #include <optional>
 
 #include "platform.h"
+#include "resource.h"
 
 using namespace std::string_view_literals;
 
 // pf::irect and RECT have identical binary layout (4 x int32_t)
 inline RECT& as_rect(pf::irect& r) { return reinterpret_cast<RECT&>(r); }
 inline const RECT& as_rect(const pf::irect& r) { return reinterpret_cast<const RECT&>(r); }
+
+// Shared clipboard helpers used by both win_impl and the free pf:: functions.
+static std::string clipboard_get_text(HWND owner)
+{
+	std::string result;
+	if (!OpenClipboard(owner)) return result;
+	const auto hData = GetClipboardData(CF_UNICODETEXT);
+	if (hData)
+	{
+		const auto pszData = static_cast<const wchar_t*>(GlobalLock(hData));
+		if (pszData)
+		{
+			result = pf::utf16_to_utf8(pszData);
+			GlobalUnlock(hData);
+		}
+	}
+	CloseClipboard();
+	return result;
+}
+
+static bool clipboard_set_text(HWND owner, std::string_view text)
+{
+	if (!OpenClipboard(owner)) return false;
+	bool success = false;
+	EmptyClipboard();
+	const auto wtext = pf::utf8_to_utf16(text);
+	const auto len = wtext.size() + 1;
+	if (const auto hData = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, len * sizeof(wchar_t)))
+	{
+		const auto pszData = static_cast<wchar_t*>(GlobalLock(hData));
+		if (pszData)
+		{
+			wcsncpy_s(pszData, len, wtext.c_str(), wtext.size());
+			GlobalUnlock(hData);
+			success = SetClipboardData(CF_UNICODETEXT, hData) != nullptr;
+		}
+		if (!success)
+			GlobalFree(hData);
+	}
+	CloseClipboard();
+	return success;
+}
 
 constexpr uint32_t xrgb(const uint32_t r, const uint32_t g, const uint32_t b)
 {
@@ -54,7 +107,7 @@ pf::file_path tmp_folder()
 	return pf::file_path{result};
 }
 
-// ── Globals ────────────────────────────────────────────────────────────────────
+//  Globals 
 
 static HINSTANCE resource_instance = nullptr;
 static HWND g_hWnd = nullptr;
@@ -269,20 +322,24 @@ static const wchar_t* map_font_name(const pf::font_name name)
 	case pf::font_name::consolas: return L"Consolas";
 	case pf::font_name::arial: return L"Arial";
 	case pf::font_name::calibri: return L"Calibri";
+	case pf::font_name::segoe_icons: return L"Segoe Fluent Icons";
 	}
 	return L"Consolas";
 }
 
 static HFONT create_platform_font(const pf::font& f)
 {
+	const auto family = map_font_name(f.name);
+	const bool is_icon = f.name == pf::font_name::segoe_icons;
 	return ::CreateFont(
 		-f.size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
 		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-		CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN,
-		map_font_name(f.name));
+		CLEARTYPE_QUALITY,
+		is_icon ? (DEFAULT_PITCH | FF_DONTCARE) : (FIXED_PITCH | FF_MODERN),
+		family);
 }
 
-// Font cache — keyed on (size, font_name), HFONTs live until process exit
+// Font cache â€” keyed on (size, font_name), HFONTs live until process exit
 static std::map<std::pair<int, pf::font_name>, HFONT> s_font_cache;
 
 static HFONT get_cached_font(const pf::font& f)
@@ -297,7 +354,7 @@ static HFONT get_cached_font(const pf::font& f)
 }
 
 // Win32 draw_context implementation
-// Caches fonts and DC state — only issues GDI calls when values actually change.
+// Caches fonts and DC state â€” only issues GDI calls when values actually change.
 // Original DC state is restored in the destructor.
 class win_draw_context final : public pf::draw_context
 {
@@ -412,6 +469,124 @@ public:
 		SelectObject(_hdc, old_pen);
 		DeleteObject(pen);
 	}
+
+	void draw_bitmap(const int x, const int y, const pf::bitmap& bmp) override
+	{
+		if (bmp.empty()) return;
+		BITMAPINFO bi = {};
+		bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		bi.bmiHeader.biWidth = bmp.width;
+		bi.bmiHeader.biHeight = -bmp.height; // top-down
+		bi.bmiHeader.biPlanes = 1;
+		bi.bmiHeader.biBitCount = 32;
+		bi.bmiHeader.biCompression = BI_RGB;
+		SetDIBitsToDevice(_hdc,
+		                  x, y,
+		                  bmp.width, bmp.height,
+		                  0, 0,
+		                  0, bmp.height,
+		                  bmp.pixels.data(),
+		                  &bi,
+		                  DIB_RGB_COLORS);
+	}
+
+	void draw_bitmap(const pf::irect& dest, const pf::bitmap& bmp) override
+	{
+		if (bmp.empty()) return;
+		BITMAPINFO bi = {};
+		bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		bi.bmiHeader.biWidth = bmp.width;
+		bi.bmiHeader.biHeight = -bmp.height; // top-down
+		bi.bmiHeader.biPlanes = 1;
+		bi.bmiHeader.biBitCount = 32;
+		bi.bmiHeader.biCompression = BI_RGB;
+		const int prev_mode = SetStretchBltMode(_hdc, HALFTONE);
+		SetBrushOrgEx(_hdc, 0, 0, nullptr);
+		StretchDIBits(_hdc,
+		              dest.left, dest.top,
+		              dest.width(), dest.height(),
+		              0, 0,
+		              bmp.width, bmp.height,
+		              bmp.pixels.data(),
+		              &bi,
+		              DIB_RGB_COLORS,
+		              SRCCOPY);
+		SetStretchBltMode(_hdc, prev_mode);
+	}
+
+	void draw_text_h(const int x, const int y, const std::string_view text,
+	                 const pf::font_handle handle, const pf::color_t text_color) override
+	{
+		const auto hfont = std::bit_cast<HFONT>(handle);
+		const auto old_font = static_cast<HFONT>(SelectObject(_hdc, hfont));
+		_font = hfont;
+		SetBkMode(_hdc, TRANSPARENT);
+		SetTextColor(_hdc, text_color.rgb());
+		_text_color = text_color.rgb();
+		const auto wtext = pf::utf8_to_utf16(text);
+		ExtTextOutW(_hdc, x, y, 0, nullptr, wtext.c_str(), static_cast<UINT>(wtext.size()), nullptr);
+		SelectObject(_hdc, old_font);
+		_font = old_font;
+	}
+
+	pf::isize measure_text_h(const std::string_view text, const pf::font_handle handle) const override
+	{
+		const auto hfont = std::bit_cast<HFONT>(handle);
+		const auto old_font = static_cast<HFONT>(SelectObject(_hdc, hfont));
+		const auto wtext = pf::utf8_to_utf16(text);
+		SIZE sz = {0, 0};
+		GetTextExtentPoint32W(_hdc, wtext.c_str(), static_cast<int>(wtext.size()), &sz);
+		SelectObject(_hdc, old_font);
+		return {sz.cx, sz.cy};
+	}
+
+	void draw_solid_line(const pf::ipoint a, const pf::ipoint b, const pf::color_t color, const int width) override
+	{
+		const auto pen = CreatePen(PS_SOLID, width > 0 ? width : 1, color.rgb());
+		const auto old_pen = SelectObject(_hdc, pen);
+		MoveToEx(_hdc, a.x, a.y, nullptr);
+		LineTo(_hdc, b.x, b.y);
+		SelectObject(_hdc, old_pen);
+		DeleteObject(pen);
+	}
+
+	void draw_ellipse(const int x, const int y, const int w, const int h,
+	                  const pf::color_t color, const int line_width) override
+	{
+		const auto pen = CreatePen(PS_SOLID, line_width > 0 ? line_width : 1, color.rgb());
+		const auto old_pen = SelectObject(_hdc, pen);
+		const auto old_brush = SelectObject(_hdc, GetStockObject(NULL_BRUSH));
+		Ellipse(_hdc, x, y, x + w, y + h);
+		SelectObject(_hdc, old_brush);
+		SelectObject(_hdc, old_pen);
+		DeleteObject(pen);
+	}
+
+	void fill_ellipse(const int x, const int y, const int w, const int h, const pf::color_t color) override
+	{
+		const auto brush = CreateSolidBrush(color.rgb() & 0x00FFFFFF);
+		const auto old_brush = SelectObject(_hdc, brush);
+		const auto old_pen = SelectObject(_hdc, GetStockObject(NULL_PEN));
+		Ellipse(_hdc, x, y, x + w, y + h);
+		SelectObject(_hdc, old_pen);
+		SelectObject(_hdc, old_brush);
+		DeleteObject(brush);
+	}
+
+	void set_clip_rect(const pf::irect& rc) override
+	{
+		POINT view = {0, 0};
+		GetWindowOrgEx(_hdc, &view);
+		const auto rgn = CreateRectRgn(rc.left - view.x, rc.top - view.y,
+		                               rc.right - view.x, rc.bottom - view.y);
+		SelectClipRgn(_hdc, rgn);
+		DeleteObject(rgn);
+	}
+
+	void clear_clip_rect() override
+	{
+		SelectClipRgn(_hdc, nullptr);
+	}
 };
 
 // Win32 measure_context implementation
@@ -458,20 +633,55 @@ public:
 		::GetTextMetrics(_hdc, &tm);
 		return {tm.tmAveCharWidth, tm.tmHeight + tm.tmExternalLeading};
 	}
+
+protected:
+	// Used by win_measure_context_owned to restore the font before its
+	// owned HDC is released, so this base destructor has nothing to do.
+	void restore_font_for_owned()
+	{
+		if (_font != _orig_font)
+		{
+			SelectObject(_hdc, _orig_font);
+			_font = _orig_font;
+		}
+	}
 };
 
-// Win32 measure_context that owns its HDC (for use outside paint)
+// Win32 measure_context that owns its HDC (for use outside paint).
+// NOTE: the base ~win_measure_context() runs *after* this destructor, so
+// the HDC must still be valid at that point. We release it via a
+// member-scoped guard that destructs after the base.
 class win_measure_context_owned final : public win_measure_context
 {
+	struct dc_holder
+	{
+		HWND hwnd;
+		HDC hdc;
+		~dc_holder() { if (hdc) ReleaseDC(hwnd, hdc); }
+	};
+
+	// Declared before the base subobject would be destroyed? No — bases
+	// destruct after members of the most-derived class. So instead we
+	// restore the original font in *this* destructor (before the base
+	// runs SelectObject on a freed DC) and then release.
 	HWND _hwnd;
 	HDC _owned_hdc;
 
 public:
-	win_measure_context_owned(const HWND hwnd, const HDC hdc) : win_measure_context(hdc), _hwnd(hwnd), _owned_hdc(hdc)
+	win_measure_context_owned(const HWND hwnd, const HDC hdc)
+		: win_measure_context(hdc), _hwnd(hwnd), _owned_hdc(hdc)
 	{
 	}
 
-	~win_measure_context_owned() override { ReleaseDC(_hwnd, _owned_hdc); }
+	~win_measure_context_owned() override
+	{
+		// Release happens here; base destructor will run after but only
+		// touches the HDC if the font changed. Pre-restore the font so
+		// the base sees no work to do.
+		restore_font_for_owned();
+		ReleaseDC(_hwnd, _owned_hdc);
+		_owned_hdc = nullptr;
+	}
 };
 
 
@@ -501,8 +711,20 @@ class win_impl final : public win, public pf::window_frame
 
 		discard_back_buffer();
 
+		if (cx <= 0 || cy <= 0)
+			return;
+
 		_hdc_back = CreateCompatibleDC(hdc);
+		if (!_hdc_back)
+			return;
+
 		_hbm_back = CreateCompatibleBitmap(hdc, cx, cy);
+		if (!_hbm_back)
+		{
+			DeleteDC(_hdc_back);
+			_hdc_back = nullptr;
+			return;
+		}
 		_hbm_back_old = SelectObject(_hdc_back, _hbm_back);
 		_back_cx = cx;
 		_back_cy = cy;
@@ -536,7 +758,7 @@ public:
 	void set_self_ref(const pf::window_frame_ptr& ref) { _self_ref = ref; }
 	pf::window_frame_ptr self() { return _self_ref; }
 
-	// ── window_frame implementation ──
+	//  window_frame implementation 
 
 	void set_reactor(pf::frame_reactor_ptr reactor) override
 	{
@@ -590,7 +812,8 @@ public:
 
 	void release_capture() override
 	{
-		ReleaseCapture();
+		if (GetCapture() == m_hWnd)
+			ReleaseCapture();
 	}
 
 	uint32_t set_timer(const uint32_t id, const uint32_t ms) override
@@ -623,6 +846,10 @@ public:
 			break;
 		case pf::cursor_shape::size_ns: id = IDC_SIZENS;
 			break;
+		case pf::cursor_shape::hand: id = IDC_HAND;
+			break;
+		case pf::cursor_shape::wait: id = IDC_WAIT;
+			break;
 		}
 		SetCursor(::LoadCursor(nullptr, id));
 	}
@@ -649,45 +876,12 @@ public:
 
 	std::string text_from_clipboard() override
 	{
-		std::string result;
-		if (OpenClipboard(m_hWnd))
-		{
-			const auto hData = GetClipboardData(CF_UNICODETEXT);
-			if (hData)
-			{
-				const auto pszData = static_cast<const wchar_t*>(GlobalLock(hData));
-				if (pszData)
-				{
-					result = pf::utf16_to_utf8(pszData);
-					GlobalUnlock(hData);
-				}
-			}
-			CloseClipboard();
-		}
-		return result;
+		return clipboard_get_text(m_hWnd);
 	}
 
 	bool text_to_clipboard(const std::string_view text) override
 	{
-		bool success = false;
-		if (OpenClipboard(m_hWnd))
-		{
-			EmptyClipboard();
-			const auto wtext = pf::utf8_to_utf16(text);
-			const auto len = wtext.size() + 1;
-			const auto hData = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, len * sizeof(wchar_t));
-			if (hData)
-			{
-				const auto pszData = static_cast<wchar_t*>(GlobalLock(hData));
-				wcsncpy_s(pszData, len, wtext.c_str(), wtext.size());
-				GlobalUnlock(hData);
-				success = SetClipboardData(CF_UNICODETEXT, hData) != nullptr;
-				if (!success)
-					GlobalFree(hData);
-			}
-			CloseClipboard();
-		}
-		return success;
+		return clipboard_set_text(m_hWnd, text);
 	}
 
 	placement get_placement() const override
@@ -834,7 +1028,9 @@ public:
 		DragAcceptFiles(m_hWnd, accept ? TRUE : FALSE);
 	}
 
-	// ── Win32 message handling ──
+	pf::toolbar_frame_ptr create_address_bar(const pf::address_bar_config& cfg) override;
+
+	//  Win32 message handling 
 
 	virtual LRESULT handle_message(const HWND hWnd, const UINT uMsg, const WPARAM wParam, const LPARAM lParam)
 	{
@@ -893,13 +1089,21 @@ public:
 
 			ensure_back_buffer(hdc, cx, cy);
 
+			if (_hdc_back)
 			{
 				win_draw_context draw_ctx(_hdc_back, clip);
 				auto self = _self_ref;
 				_reactor->handle_paint(self, draw_ctx);
+				BitBlt(hdc, 0, 0, cx, cy, _hdc_back, 0, 0, SRCCOPY);
 			}
-
-			BitBlt(hdc, 0, 0, cx, cy, _hdc_back, 0, 0, SRCCOPY);
+			else
+			{
+				// Fall back to painting directly to the window DC if the back
+				// buffer could not be created.
+				win_draw_context draw_ctx(hdc, clip);
+				auto self = _self_ref;
+				_reactor->handle_paint(self, draw_ctx);
+			}
 
 			EndPaint(m_hWnd, &ps);
 			return 0;
@@ -922,6 +1126,24 @@ public:
 		{
 			apply_menu_state(reinterpret_cast<HMENU>(wParam));
 			return 0;
+		}
+
+		// On per-monitor-v2 DPI change, resize the window to the rect
+		// suggested by Windows so child controls and layout follow the
+		// new DPI. Notify the reactor first so it can refresh metrics.
+		if (uMsg == WM_DPICHANGED)
+		{
+			if (const auto* const rc = reinterpret_cast<const RECT*>(lParam))
+			{
+				const auto self = _self_ref;
+				if (self)
+					_reactor->handle_message(self, pf::message_type::dpi_changed, wParam, lParam);
+				SetWindowPos(hWnd, nullptr,
+				             rc->left, rc->top,
+				             rc->right - rc->left, rc->bottom - rc->top,
+				             SWP_NOZORDER | SWP_NOACTIVATE);
+				return 0;
+			}
 		}
 
 		// Dispatch menu/accelerator WM_COMMAND via pf::menu_command actions
@@ -998,7 +1220,7 @@ public:
 		return DefWindowProc(hWnd, uMsg, wParam, lParam);
 	}
 
-	// ── Win32 window procedure ──
+	//  Win32 window procedure 
 
 	static LRESULT CALLBACK win_proc(const HWND hwnd, const UINT uMsg, const WPARAM wParam, const LPARAM lParam)
 	{
@@ -1036,7 +1258,7 @@ public:
 		return DefWindowProc(hwnd, uMsg, wParam, lParam);
 	}
 
-	// ── Window class registration & creation ──
+	//  Window class registration & creation 
 
 	static bool register_class(const UINT style, const HICON hIcon, const HCURSOR hCursor,
 	                           const uint32_t clr_background,
@@ -1205,9 +1427,9 @@ static std::string window_text(const HWND h)
 	return pf::utf16_to_utf8(wresult);
 }
 
-// ── Platform API implementations ───────────────────────────────────────────
+//  Platform API implementations â”€
 
-// ── Key binding formatting ─────────────────────────────────────────────────────
+//  Key binding formatting â”€
 
 std::string pf::format_key_binding(const key_binding& kb)
 {
@@ -1283,7 +1505,121 @@ std::string pf::format_key_binding(const key_binding& kb)
 	return result;
 }
 
-// ── Cursor position (global) ───────────────────────────────────────────────────
+//  Font handles, native DC wrapper, URL resolver 
+
+pf::font_handle pf::create_font_handle(const font_def& def, font_metrics_data* out_metrics)
+{
+	const auto wface = utf8_to_utf16(def.face);
+	LOGFONTW lf = {};
+	lf.lfHeight = -def.size;
+	lf.lfWeight = def.weight;
+	lf.lfItalic = def.italic ? TRUE : FALSE;
+	lf.lfUnderline = def.underline ? TRUE : FALSE;
+	lf.lfStrikeOut = def.strikeout ? TRUE : FALSE;
+	lf.lfCharSet = DEFAULT_CHARSET;
+	lf.lfOutPrecision = OUT_DEFAULT_PRECIS;
+	lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
+	lf.lfQuality = CLEARTYPE_QUALITY;
+	lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+	wcsncpy_s(lf.lfFaceName, wface.c_str(), _TRUNCATE);
+
+	const auto hfont = CreateFontIndirectW(&lf);
+	if (!hfont) return 0;
+
+	if (out_metrics)
+	{
+		const HDC hdc = GetDC(nullptr);
+		const auto old = static_cast<HFONT>(SelectObject(hdc, hfont));
+		TEXTMETRICW tm = {};
+		GetTextMetricsW(hdc, &tm);
+		out_metrics->height = tm.tmHeight;
+		out_metrics->ascent = tm.tmAscent;
+		out_metrics->descent = tm.tmDescent;
+		out_metrics->x_height = tm.tmHeight;
+		out_metrics->avg_char_width = tm.tmAveCharWidth;
+		SelectObject(hdc, old);
+		ReleaseDC(nullptr, hdc);
+	}
+
+	return std::bit_cast<font_handle>(hfont);
+}
+
+void pf::delete_font_handle(const font_handle h)
+{
+	if (h) DeleteObject(std::bit_cast<HFONT>(h));
+}
+
+pf::isize pf::measure_text_with_font(const font_handle h, const std::string_view text)
+{
+	if (!h) return {0, 0};
+	const HDC hdc = GetDC(nullptr);
+	if (!hdc) return {0, 0};
+	const auto old = static_cast<HFONT>(SelectObject(hdc, std::bit_cast<HFONT>(h)));
+	const auto wtext = utf8_to_utf16(text);
+	SIZE sz = {0, 0};
+	GetTextExtentPoint32W(hdc, wtext.c_str(), static_cast<int>(wtext.size()), &sz);
+	SelectObject(hdc, old);
+	ReleaseDC(nullptr, hdc);
+	return {sz.cx, sz.cy};
+}
+
+int pf::line_height_for_font(const font_handle h)
+{
+	if (!h) return 0;
+	const HDC hdc = GetDC(nullptr);
+	if (!hdc) return 0;
+	const auto old = static_cast<HFONT>(SelectObject(hdc, std::bit_cast<HFONT>(h)));
+	TEXTMETRICW tm = {};
+	GetTextMetricsW(hdc, &tm);
+	SelectObject(hdc, old);
+	ReleaseDC(nullptr, hdc);
+	return tm.tmHeight;
+}
+
+std::unique_ptr<pf::draw_context> pf::wrap_native_dc(const uintptr_t native_dc, const irect& clip)
+{
+	return std::make_unique<win_draw_context>(std::bit_cast<HDC>(native_dc), clip);
+}
+
+std::unique_ptr<pf::measure_context> pf::wrap_native_dc_measure(const uintptr_t native_dc)
+{
+	return std::make_unique<win_measure_context>(std::bit_cast<HDC>(native_dc));
+}
+
+std::string pf::resolve_url(const std::string_view base, const std::string_view rel)
+{
+	const auto wrel = utf8_to_utf16(rel);
+	const auto wbase = utf8_to_utf16(base);
+	std::wstring wresult;
+
+	if (PathIsRelativeW(wrel.c_str()) && !PathIsURLW(wrel.c_str()))
+	{
+		wchar_t abs_url[2084]; // INTERNET_MAX_URL_LENGTH
+		DWORD dl = std::size(abs_url);
+		if (UrlCombineW(wbase.c_str(), wrel.c_str(), abs_url, &dl, 0) == S_OK)
+			wresult.assign(abs_url, dl);
+	}
+	else if (PathIsURLW(wrel.c_str()))
+	{
+		wresult = wrel;
+	}
+	else
+	{
+		wchar_t abs_url[2084]; // INTERNET_MAX_URL_LENGTH
+		DWORD dl = std::size(abs_url);
+		if (UrlCreateFromPathW(wrel.c_str(), abs_url, &dl, 0) == S_OK)
+			wresult.assign(abs_url, dl);
+	}
+
+	auto result = utf16_to_utf8(wresult);
+	if (result.starts_with("file:///"))
+		result.erase(5, 1);
+	if (result.starts_with("file://"))
+		result.erase(0, 7);
+	return result;
+}
+
+//  Cursor position (global) â”€
 
 pf::ipoint pf::platform_cursor_pos()
 {
@@ -1292,7 +1628,33 @@ pf::ipoint pf::platform_cursor_pos()
 	return {pt.x, pt.y};
 }
 
-// ── Timer ──────────────────────────────────────────────────────────────────────
+pf::isize pf::platform_screen_size()
+{
+	return {GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+}
+
+int pf::platform_screen_dpi()
+{
+	const HDC hdc = GetDC(nullptr);
+	const auto dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+	ReleaseDC(nullptr, hdc);
+	return dpi > 0 ? dpi : 96;
+}
+
+std::string pf::platform_load_text_resource(const int id)
+{
+	const auto hinst = GetModuleHandleW(nullptr);
+	const auto hrsrc = FindResourceW(hinst, MAKEINTRESOURCEW(id), RT_HTML);
+	if (!hrsrc) return {};
+	const auto hg = LoadResource(hinst, hrsrc);
+	if (!hg) return {};
+	const auto data = static_cast<const char*>(LockResource(hg));
+	const auto size = SizeofResource(hinst, hrsrc);
+	if (!data || size == 0) return {};
+	return std::string(data, size);
+}
+
+//  Timer 
 
 
 double pf::platform_get_time()
@@ -1308,7 +1670,7 @@ void pf::platform_sleep(const int milliseconds)
 	Sleep(static_cast<DWORD>(milliseconds));
 }
 
-// ── Resource Loading ───────────────────────────────────────────────────────────
+//  Resource Loading â”€
 
 void* pf::platform_load_resource(const std::string_view name, const std::string_view type)
 {
@@ -1332,26 +1694,41 @@ std::optional<pf::bitmap_data> pf::platform_load_bitmap_resource(const std::stri
 	const auto pData = static_cast<const uint8_t*>(platform_load_resource(resName, "BITMAP"));
 	if (!pData) return std::nullopt;
 
+	// Determine resource size so we can bounds-check.
+	const auto wname = utf8_to_utf16(resName);
+	const HRSRC hres = FindResourceW(nullptr, wname.c_str(), RT_BITMAP);
+	const DWORD res_size = hres ? SizeofResource(nullptr, hres) : 0;
+	if (res_size < sizeof(BITMAPINFOHEADER)) return std::nullopt;
+
 	const auto bih = reinterpret_cast<const BITMAPINFOHEADER*>(pData);
+	if (bih->biSize < sizeof(BITMAPINFOHEADER) || bih->biSize > res_size) return std::nullopt;
 	const int w = bih->biWidth;
 	const int h = abs(bih->biHeight);
+	if (w <= 0 || h <= 0 || w > 0x10000 || h > 0x10000) return std::nullopt;
 	const bool topDown = bih->biHeight < 0;
 	const int bpp = bih->biBitCount;
 
 	int paletteSize = 0;
 	if (bpp <= 8)
-		paletteSize = (bih->biClrUsed ? bih->biClrUsed : 1 << bpp) * static_cast<int>(sizeof(RGBQUAD));
+	{
+		const DWORD entries = bih->biClrUsed ? bih->biClrUsed : (1u << bpp);
+		if (entries > 256) return std::nullopt;
+		paletteSize = static_cast<int>(entries * sizeof(RGBQUAD));
+	}
+
+	const int srcStride = (w * bpp + 31) / 32 * 4;
+	const size_t pixel_bytes = static_cast<size_t>(srcStride) * h;
+	if (bih->biSize + paletteSize + pixel_bytes > res_size) return std::nullopt;
 
 	const uint8_t* pixelData = pData + bih->biSize + paletteSize;
 	const RGBQUAD* palette = bpp <= 8 ? reinterpret_cast<const RGBQUAD*>(pData + bih->biSize) : nullptr;
 
-	std::vector<uint32_t> pixels(w * h, 0);
-	const int srcStride = (w * bpp + 31) / 32 * 4;
+	std::vector<uint32_t> pixels(static_cast<size_t>(w) * static_cast<size_t>(h), 0);
 
 	for (int y = 0; y < h; y++)
 	{
 		const int srcY = topDown ? y : h - 1 - y;
-		const uint8_t* srcRow = pixelData + srcY * srcStride;
+		const uint8_t* srcRow = pixelData + static_cast<size_t>(srcY) * srcStride;
 
 		for (int x = 0; x < w; x++)
 		{
@@ -1374,14 +1751,14 @@ std::optional<pf::bitmap_data> pf::platform_load_bitmap_resource(const std::stri
 				const uint8_t idx = x & 1 ? srcRow[x / 2] & 0x0F : srcRow[x / 2] >> 4;
 				c = xrgb(palette[idx].rgbRed, palette[idx].rgbGreen, palette[idx].rgbBlue);
 			}
-			pixels[y * w + x] = c;
+			pixels[static_cast<size_t>(y) * w + x] = c;
 		}
 	}
 
 	return bitmap_data{w, h, pixels};
 }
 
-// ── Utility ────────────────────────────────────────────────────────────────────
+//  Utility 
 
 void pf::platform_show_error(const std::string_view message, const std::string_view title)
 {
@@ -1446,9 +1823,9 @@ void pf::write_stdout(const std::string_view text)
 	fflush(stdout);
 }
 
-// ── Sound — WAV resource helpers ───────────────────────────────────────────────
+//  Sound â€” WAV resource helpers â”€
 
-// ── Menu & Accelerators ────────────────────────────────────────────────────────
+//  Menu & Accelerators 
 
 static std::wstring menu_display_text(const pf::menu_command& item)
 {
@@ -1461,7 +1838,7 @@ static std::wstring menu_display_text(const pf::menu_command& item)
 	return text;
 }
 
-static HMENU BuildPopupMenu(const std::vector<pf::menu_command>& items)
+static HMENU build_popup_menu(const std::vector<pf::menu_command>& items)
 {
 	const HMENU hMenu = CreatePopupMenu();
 	for (auto& item : items)
@@ -1469,7 +1846,7 @@ static HMENU BuildPopupMenu(const std::vector<pf::menu_command>& items)
 		if (item.text.empty() && item.children.empty())
 			AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
 		else if (!item.children.empty())
-			AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(BuildPopupMenu(item.children)),
+			AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(build_popup_menu(item.children)),
 			            menu_display_text(item).c_str());
 		else
 			AppendMenuW(hMenu, MF_STRING, item.id, menu_display_text(item).c_str());
@@ -1489,7 +1866,7 @@ void pf::platform_set_menu(std::vector<menu_command> menuDef)
 	for (auto& top : g_menuDef)
 	{
 		if (!top.children.empty())
-			AppendMenuW(g_hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(BuildPopupMenu(top.children)),
+			AppendMenuW(g_hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(build_popup_menu(top.children)),
 			            utf8_to_utf16(top.text).c_str());
 		else
 			AppendMenuW(g_hMenu, MF_STRING, top.id, utf8_to_utf16(top.text).c_str());
@@ -1517,7 +1894,7 @@ bool pf::platform_events()
 	return true;
 }
 
-// ── Message Loop ───────────────────────────────────────────────────────────────
+//  Message Loop â”€
 
 static CRITICAL_SECTION cs_async;
 static CRITICAL_SECTION cs_ui;
@@ -1610,7 +1987,16 @@ static void init_handles()
 	exit_h = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 	ui_event_h = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
-	QueryPerformanceFrequency(&g_perfFreq);
+	if (!async_h || !exit_h || !ui_event_h)
+	{
+		pf::debug_trace("init_handles: CreateEvent failed\n");
+		std::abort();
+	}
+
+	if (!QueryPerformanceFrequency(&g_perfFreq) || g_perfFreq.QuadPart == 0)
+	{
+		g_perfFreq.QuadPart = 1; // avoid division by zero in platform_get_time
+	}
 	QueryPerformanceCounter(&g_perfStart);
 }
 
@@ -1686,7 +2072,7 @@ cleanup:
 	return result;
 }
 
-// ── File I/O ───────────────────────────────────────────────────────────────────
+//  File I/O â”€
 
 
 bool pf::platform_move_file_replace(const char* source, const char* dest)
@@ -1783,50 +2169,17 @@ bool pf::platform_clipboard_has_text()
 
 std::string pf::platform_text_from_clipboard()
 {
-	std::string result;
-	if (OpenClipboard(nullptr))
-	{
-		const auto hData = GetClipboardData(CF_UNICODETEXT);
-		if (hData)
-		{
-			const auto pszData = static_cast<const wchar_t*>(GlobalLock(hData));
-			if (pszData)
-			{
-				result = utf16_to_utf8(pszData);
-				GlobalUnlock(hData);
-			}
-		}
-		CloseClipboard();
-	}
-	return result;
+	return clipboard_get_text(nullptr);
 }
 
 bool pf::platform_text_to_clipboard(const std::string_view text)
 {
-	bool success = false;
-	if (OpenClipboard(nullptr))
-	{
-		EmptyClipboard();
-		const auto wtext = utf8_to_utf16(text);
-		const auto len = wtext.size() + 1;
-		const auto hData = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, len * sizeof(wchar_t));
-		if (hData)
-		{
-			const auto pszData = static_cast<wchar_t*>(GlobalLock(hData));
-			wcsncpy_s(pszData, len, wtext.c_str(), wtext.size());
-			GlobalUnlock(hData);
-			success = SetClipboardData(CF_UNICODETEXT, hData) != nullptr;
-			if (!success)
-				GlobalFree(hData);
-		}
-		CloseClipboard();
-	}
-	return success;
+	return clipboard_set_text(nullptr, text);
 }
 
-// ── File system utilities ──────────────────────────────────────────────────────
+//  File system utilities 
 
-// ── Configuration (INI file) ───────────────────────────────────────────────────
+//  Configuration (INI file) â”€
 
 static pf::file_path get_config_path()
 {
@@ -1834,14 +2187,27 @@ static pf::file_path get_config_path()
 	wchar_t w_exe_path[MAX_PATH];
 	GetModuleFileNameW(nullptr, w_exe_path, MAX_PATH);
 	const auto exe_path = pf::utf16_to_utf8(w_exe_path);
-	auto ini_path = pf::file_path(pf::file_path(exe_path).folder()).combine("rethinkify", "ini");
+	auto ini_path = pf::file_path(exe_path).folder().combine("rethinkify", "ini");
 
-	// Test if we can write to the exe directory
-	const auto h = CreateFileW(pf::utf8_to_utf16(ini_path.view()).c_str(), GENERIC_WRITE, FILE_SHARE_READ,
-	                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	// Probe writability without creating a sentinel file: try to open
+	// the existing ini for write, or create a temp file in the same
+	// folder and immediately delete it.
+	const auto w_ini = pf::utf8_to_utf16(ini_path.view());
+	const auto h = CreateFileW(w_ini.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+	                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 	if (h != INVALID_HANDLE_VALUE)
 	{
 		CloseHandle(h);
+		return ini_path;
+	}
+
+	// File doesn't exist — try to create it. If creation succeeds the
+	// directory is writable and we keep the (empty) file.
+	const auto h2 = CreateFileW(w_ini.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+	                            nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (h2 != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(h2);
 		return ini_path;
 	}
 
@@ -1934,7 +2300,7 @@ pf::file_path pf::save_file_path(const std::string_view title, const file_path& 
 	return {};
 }
 
-// ── Platform locale ────────────────────────────────────────────────────────────
+//  Platform locale 
 
 std::string pf::platform_language()
 {
@@ -1944,7 +2310,7 @@ std::string pf::platform_language()
 	return "en-US";
 }
 
-// ── Platform Spell Checking (ISpellChecker) ────────────────────────────────────
+//  Platform Spell Checking (ISpellChecker) 
 
 class win_spell_checker final : public pf::spell_checker
 {
@@ -2121,7 +2487,7 @@ std::unique_ptr<pf::spell_checker> pf::create_spell_checker()
 	return std::make_unique<win_spell_checker>();
 }
 
-// ── Platform File I/O ──────────────────────────────────────────────────────────
+//  Platform File I/O 
 
 struct win_file_handle final : pf::file_handle
 {
@@ -2160,7 +2526,7 @@ pf::file_handle_ptr pf::open_for_read(const file_path& path)
 	return std::make_shared<win_file_handle>(h, sz);
 }
 
-// ── Writable File Handle ───────────────────────────────────────────────────────
+//  Writable File Handle â”€
 
 struct win_writable_file_handle final : pf::writable_file_handle
 {
@@ -2192,8 +2558,6 @@ pf::writable_file_handle_ptr pf::open_file_for_write(const file_path& path)
 	return std::make_shared<win_writable_file_handle>(h);
 }
 
-// ── DPI Awareness Helper ───────────────────────────────────────────────────────
-
 static BOOL SetProcessDpiAwarenessContextIndirect(const DPI_AWARENESS_CONTEXT dpiContext)
 {
 	static const auto dll = LoadLibraryW(L"user32.dll");
@@ -2209,7 +2573,8 @@ static BOOL SetProcessDpiAwarenessContextIndirect(const DPI_AWARENESS_CONTEXT dp
 	return FALSE;
 }
 
-// ── Entry Point ────────────────────────────────────────────────────────────────
+//  Entry Point 
+
 
 INT WINAPI WinMain(const HINSTANCE hInstance, HINSTANCE, LPSTR, const int nCmdShow)
 {
@@ -2274,31 +2639,6 @@ INT WINAPI WinMain(const HINSTANCE hInstance, HINSTANCE, LPSTR, const int nCmdSh
 	return result;
 }
 
-
-// allow for different calling conventions in Linux and Windows
-#ifdef _WIN32
-#define STDCALL __stdcall
-#else
-#define STDCALL
-#endif
-
-
-// Error handler for the Artistic Style formatter.
-void STDCALL ASErrorHandler(const int errorNumber, const char* errorMessage)
-{
-	std::cout << "astyle error " << errorNumber << "\n"
-		<< errorMessage << std::endl;
-}
-
-// Allocate memory for the Artistic Style formatter.
-char* STDCALL ASMemoryAlloc(const unsigned long memoryNeeded)
-{
-	// error condition is checked after return from AStyleMain
-	const auto buffer = new(std::nothrow) char[memoryNeeded];
-	return buffer;
-}
-
-
 static bool is_folder(const DWORD attributes)
 {
 	return attributes != INVALID_FILE_ATTRIBUTES &&
@@ -2307,12 +2647,12 @@ static bool is_folder(const DWORD attributes)
 
 uint64_t ft_to_ts(const FILETIME& ft)
 {
-	return static_cast<__int64>(ft.dwHighDateTime) << 32 | ft.dwLowDateTime;
+	return (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
 }
 
 static uint64_t fs_to_i64(const DWORD nFileSizeHigh, const DWORD nFileSizeLow)
 {
-	return static_cast<__int64>(nFileSizeHigh) << 32 | nFileSizeLow;
+	return (static_cast<uint64_t>(nFileSizeHigh) << 32) | nFileSizeLow;
 }
 
 static bool is_offline_attribute(const DWORD attributes)
@@ -2347,20 +2687,23 @@ static bool is_dots(const wchar_t* name)
 	return !pf::is_empty(name);
 }
 
-static bool can_show_file(const wchar_t* name, const DWORD attributes, const bool show_hidden)
+static bool can_show_entry(const wchar_t* name, const DWORD attributes, const bool show_hidden, const bool want_folder)
 {
 	if (pf::is_empty(name)) return false;
 	if (attributes == INVALID_FILE_ATTRIBUTES) return false;
 	if (!show_hidden && (attributes & FILE_ATTRIBUTE_HIDDEN) != 0) return false;
-	return !is_folder(attributes) && !is_dots(name);
+	if (is_folder(attributes) != want_folder) return false;
+	return !is_dots(name);
+}
+
+static bool can_show_file(const wchar_t* name, const DWORD attributes, const bool show_hidden)
+{
+	return can_show_entry(name, attributes, show_hidden, false);
 }
 
 static bool can_show_folder(const wchar_t* name, const DWORD attributes, const bool show_hidden)
 {
-	if (pf::is_empty(name)) return false;
-	if (attributes == INVALID_FILE_ATTRIBUTES) return false;
-	if (!show_hidden && (attributes & FILE_ATTRIBUTE_HIDDEN) != 0) return false;
-	return is_folder(attributes) && !is_dots(name);
+	return can_show_entry(name, attributes, show_hidden, true);
 }
 
 pf::folder_contents pf::iterate_file_items(const file_path& folder, const bool show_hidden)
@@ -2731,7 +3074,7 @@ pf::web_host_ptr pf::connect_to_host(const std::string_view host, const bool sec
                                      const std::string_view user_agent)
 {
 	// InternetOpen and InternetConnect
-	const std::wstring agent_str = user_agent.empty() ? utf8_to_utf16(g_app_name) : utf8_to_utf16(user_agent);
+	const std::wstring agent_str = user_agent.empty() ? L"PotatoApp/1.0" : utf8_to_utf16(user_agent);
 	inet_handle session_handle(InternetOpenW(agent_str.c_str(), INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0));
 
 	if (!session_handle.is_valid())
@@ -2851,7 +3194,7 @@ pf::web_response pf::send_request(const web_host_ptr& host, const web_request& r
 
 	if (content.empty())
 	{
-		// Simple request with no body — use HttpSendRequest which handles redirects properly
+		// Simple request with no body â€” use HttpSendRequest which handles redirects properly
 		if (!HttpSendRequest(request_handle, headerW.c_str(), static_cast<DWORD>(headerW.size()), nullptr, 0))
 		{
 			return result;
@@ -2859,7 +3202,7 @@ pf::web_response pf::send_request(const web_host_ptr& host, const web_request& r
 	}
 	else
 	{
-		// Request with body — use HttpSendRequestEx for chunked sending
+		// Request with body â€” use HttpSendRequestEx for chunked sending
 		INTERNET_BUFFERS buffers = {};
 		buffers.dwStructSize = sizeof(INTERNET_BUFFERS);
 		buffers.lpcszHeader = headerW.c_str();
@@ -2933,4 +3276,1467 @@ pf::web_response pf::send_request(const web_host_ptr& host, const web_request& r
 	}
 
 	return result;
+}
+
+//  WIC Bitmap Loading & Async HTTP & Toolbar (Address Bar) 
+//
+// These implementations sit at the bottom of the file so they can be reviewed
+// (and eventually moved out) as a single block.
+
+#include <wincodec.h>
+#include <winhttp.h>
+
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "comctl32.lib")
+
+namespace
+{
+	// COM smart pointer (minimal â€” used only inside this file).
+	template <class T>
+	class com_ptr
+	{
+		T* _p = nullptr;
+
+	public:
+		com_ptr() = default;
+		com_ptr(const com_ptr&) = delete;
+		com_ptr& operator=(const com_ptr&) = delete;
+
+		com_ptr(com_ptr&& o) noexcept : _p(o._p) { o._p = nullptr; }
+
+		com_ptr& operator=(com_ptr&& o) noexcept
+		{
+			if (this != &o)
+			{
+				if (_p) _p->Release();
+				_p = o._p;
+				o._p = nullptr;
+			}
+			return *this;
+		}
+
+		~com_ptr() { if (_p) _p->Release(); }
+
+		T** put()
+		{
+			if (_p)
+			{
+				_p->Release();
+				_p = nullptr;
+			}
+			return &_p;
+		}
+
+		T* get() const { return _p; }
+		T* operator->() const { return _p; }
+		explicit operator bool() const { return _p != nullptr; }
+
+		void attach(T* p)
+		{
+			if (_p) _p->Release();
+			_p = p;
+		}
+	};
+
+	// Lazily-created process-wide WIC factory.
+	IWICImagingFactory* wic_factory()
+	{
+		static IWICImagingFactory* s_factory = []() -> IWICImagingFactory*
+		{
+			IWICImagingFactory* f = nullptr;
+			const auto hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+			                                 IID_PPV_ARGS(&f));
+			return SUCCEEDED(hr) ? f : nullptr;
+		}();
+		return s_factory;
+	}
+
+	pf::bitmap_ptr decode_with_wic(IWICBitmapDecoder* decoder)
+	{
+		com_ptr<IWICBitmapFrameDecode> frame;
+		if (FAILED(decoder->GetFrame(0, frame.put())) || !frame) return nullptr;
+
+		com_ptr<IWICFormatConverter> converter;
+		if (FAILED(wic_factory()->CreateFormatConverter(converter.put())) || !converter) return nullptr;
+
+		// GUID_WICPixelFormat32bppBGRA â€” top-down 32-bit BGRA, no premultiplication.
+		if (FAILED(converter->Initialize(
+			frame.get(),
+			GUID_WICPixelFormat32bppBGRA,
+			WICBitmapDitherTypeNone,
+			nullptr, 0.0,
+			WICBitmapPaletteTypeMedianCut)))
+			return nullptr;
+
+		UINT w = 0, h = 0;
+		if (FAILED(converter->GetSize(&w, &h)) || w == 0 || h == 0) return nullptr;
+
+		std::vector<uint32_t> pixels(static_cast<size_t>(w) * h);
+		const UINT stride = w * 4;
+		const UINT cb = stride * h;
+		if (FAILED(converter->CopyPixels(nullptr, stride, cb,
+			reinterpret_cast<BYTE*>(pixels.data()))))
+			return nullptr;
+
+		return std::make_shared<pf::bitmap>(static_cast<int>(w), static_cast<int>(h), std::move(pixels));
+	}
+}
+
+pf::bitmap_ptr pf::load_bitmap_file(const file_path& path)
+{
+	auto* const factory = wic_factory();
+	if (!factory) return nullptr;
+
+	com_ptr<IWICBitmapDecoder> decoder;
+	if (FAILED(factory->CreateDecoderFromFilename(
+		utf8_to_utf16(path.view()).c_str(),
+		nullptr, GENERIC_READ,
+		WICDecodeMetadataCacheOnLoad,
+		decoder.put())) || !decoder)
+		return nullptr;
+
+	return decode_with_wic(decoder.get());
+}
+
+pf::bitmap_ptr pf::load_bitmap_memory(const uint8_t* data, const size_t size)
+{
+	auto* const factory = wic_factory();
+	if (!factory || !data || size == 0) return nullptr;
+
+	com_ptr<IWICStream> stream;
+	if (FAILED(factory->CreateStream(stream.put())) || !stream) return nullptr;
+	if (FAILED(stream->InitializeFromMemory(const_cast<BYTE*>(data), static_cast<DWORD>(size)))) return nullptr;
+
+	com_ptr<IWICBitmapDecoder> decoder;
+	if (FAILED(factory->CreateDecoderFromStream(stream.get(), nullptr,
+		WICDecodeMetadataCacheOnLoad,
+		decoder.put())) || !decoder)
+		return nullptr;
+
+	return decode_with_wic(decoder.get());
+}
+
+pf::bitmap_ptr pf::load_bitmap_named_resource(const std::string_view name, const std::string_view type)
+{
+	const auto wname = utf8_to_utf16(name);
+	const auto wtype = utf8_to_utf16(type);
+	const HRSRC hres = FindResourceW(resource_instance, wname.c_str(), wtype.c_str());
+	if (!hres) return nullptr;
+	const HGLOBAL hdata = LoadResource(resource_instance, hres);
+	if (!hdata) return nullptr;
+	const auto* const ptr = static_cast<const uint8_t*>(LockResource(hdata));
+	const auto size = SizeofResource(resource_instance, hres);
+	if (!ptr || size == 0) return nullptr;
+	return load_bitmap_memory(ptr, size);
+}
+
+//  Async HTTP (WinHTTP) 
+
+namespace
+{
+	class win_async_http_request final : public pf::async_http_request,
+	                                     public std::enable_shared_from_this<win_async_http_request>
+	{
+		// Protects handles + cancelled flag. The callback thread also holds this.
+		std::mutex _mtx;
+		HINTERNET _connect = nullptr;
+		HINTERNET _request = nullptr;
+		bool _cancelled = false;
+		bool _headers_done = false;
+
+		pf::async_http_callbacks _cb;
+		std::vector<uint8_t> _read_buf;
+
+		// Keep a self-reference alive for the lifetime of the WinHTTP request,
+		// so callbacks can safely deref the object even if the caller drops
+		// their handle. Cleared on completion / error / cancel.
+		std::shared_ptr<win_async_http_request> _self_keep_alive;
+
+		void close_handles_locked()
+		{
+			if (_request)
+			{
+				WinHttpCloseHandle(_request);
+				_request = nullptr;
+			}
+			if (_connect)
+			{
+				WinHttpCloseHandle(_connect);
+				_connect = nullptr;
+			}
+		}
+
+		void fail(std::string err)
+		{
+			pf::async_http_callbacks cb;
+			{
+				std::lock_guard lk(_mtx);
+				if (_cancelled) return;
+				_cancelled = true;
+				close_handles_locked();
+				cb = std::move(_cb);
+				// _self_keep_alive is released only on HANDLE_CLOSING
+			}
+			if (cb.on_error) cb.on_error(std::move(err));
+		}
+
+		void finish()
+		{
+			pf::async_http_callbacks cb;
+			{
+				std::lock_guard lk(_mtx);
+				if (_cancelled) return;
+				_cancelled = true; // prevent re-entry from late callbacks
+				close_handles_locked();
+				cb = std::move(_cb);
+				// _self_keep_alive is released only on HANDLE_CLOSING
+			}
+			if (cb.on_complete) cb.on_complete();
+		}
+
+	public:
+		win_async_http_request() = default;
+
+		~win_async_http_request() override
+		{
+			std::lock_guard lk(_mtx);
+			close_handles_locked();
+		}
+
+		void cancel() override
+		{
+			{
+				std::lock_guard lk(_mtx);
+				if (_cancelled) return;
+				_cancelled = true;
+				close_handles_locked();
+				// _self_keep_alive is released on HANDLE_CLOSING
+			}
+		}
+
+		// Begin the request. Caller must hold a shared_ptr to *this so we can
+		// store the keep-alive copy.
+		bool start(HINTERNET session, const std::string& url, pf::async_http_callbacks cb)
+		{
+			_cb = std::move(cb);
+
+			URL_COMPONENTS uc = {};
+			uc.dwStructSize = sizeof(uc);
+			uc.dwSchemeLength = static_cast<DWORD>(-1);
+			uc.dwHostNameLength = static_cast<DWORD>(-1);
+			uc.dwUrlPathLength = static_cast<DWORD>(-1);
+			uc.dwExtraInfoLength = static_cast<DWORD>(-1);
+			const auto wurl = pf::utf8_to_utf16(url);
+			if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc))
+			{
+				fail("invalid url");
+				return false;
+			}
+
+			std::wstring host(uc.lpszHostName, uc.dwHostNameLength);
+			std::wstring path(uc.lpszUrlPath, uc.dwUrlPathLength + uc.dwExtraInfoLength);
+
+			HINTERNET connect = WinHttpConnect(session, host.c_str(), uc.nPort, 0);
+			if (!connect)
+			{
+				fail(std::format("connect failed (err {})", GetLastError()));
+				return false;
+			}
+
+			// Detect HTTPS robustly. uc.nScheme is only populated by
+			// WinHttpCrackUrl in some configurations; the documented behaviour
+			// when lpszScheme/dwSchemeLength are used to receive a pointer +
+			// length into the URL leaves nScheme set to 0
+			// (INTERNET_SCHEME_UNKNOWN). Without WINHTTP_FLAG_SECURE the
+			// request is sent as plain HTTP to port 443, which servers reject
+			// (Cloudflare returns "400 The plain HTTP request was sent to
+			// HTTPS port"; Google/Wikipedia surface as 12152).
+			const bool is_https =
+				uc.nScheme == INTERNET_SCHEME_HTTPS ||
+				uc.nPort == INTERNET_DEFAULT_HTTPS_PORT ||
+				(uc.lpszScheme != nullptr && uc.dwSchemeLength == 5 &&
+					_wcsnicmp(uc.lpszScheme, L"https", 5) == 0);
+			DWORD flags = 0;
+			if (is_https) flags |= WINHTTP_FLAG_SECURE;
+			HINTERNET request = WinHttpOpenRequest(connect, L"GET", path.c_str(),
+			                                       nullptr, nullptr,
+			                                       nullptr, flags);
+			if (!request)
+			{
+				const auto err = GetLastError();
+				WinHttpCloseHandle(connect);
+				fail(std::format("open request failed (err {})", err));
+				return false;
+			}
+
+			// Install callback BEFORE registration so we don't miss any events.
+			WinHttpSetStatusCallback(request,
+			                         &win_async_http_request::s_callback,
+			                         WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS |
+			                         WINHTTP_CALLBACK_FLAG_HANDLES,
+			                         0);
+
+			{
+				std::lock_guard lk(_mtx);
+				if (_cancelled)
+				{
+					WinHttpCloseHandle(request);
+					WinHttpCloseHandle(connect);
+					return false;
+				}
+				_connect = connect;
+				_request = request;
+				// Take the keep-alive *before* WinHttpSendRequest so any
+				// callback fired between send and our return finds a valid
+				// self-reference.
+				_self_keep_alive = shared_from_this();
+			}
+
+			if (!WinHttpSendRequest(request,
+			                        nullptr, 0,
+			                        nullptr, 0,
+			                        0, reinterpret_cast<DWORD_PTR>(this)))
+			{
+				fail(std::format("send request failed (err {})", GetLastError()));
+				return false;
+			}
+
+			return true;
+		}
+
+	private:
+		void on_send_complete()
+		{
+			HINTERNET req;
+			{
+				std::lock_guard lk(_mtx);
+				if (_cancelled) return;
+				req = _request;
+			}
+			if (!WinHttpReceiveResponse(req, nullptr))
+				fail("receive response failed");
+		}
+
+		void on_headers_available()
+		{
+			HINTERNET req;
+			pf::async_http_callbacks cb_copy;
+			{
+				std::lock_guard lk(_mtx);
+				if (_cancelled) return;
+				req = _request;
+				_headers_done = true;
+				cb_copy = _cb;
+			}
+
+			DWORD status = 0;
+			DWORD sz = sizeof(status);
+			WinHttpQueryHeaders(req,
+			                    WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+			                    nullptr,
+			                    &status, &sz, nullptr);
+
+			std::string content_type;
+			DWORD ct_sz = 0;
+			WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_TYPE,
+			                    nullptr, nullptr, &ct_sz,
+			                    nullptr);
+			if (ct_sz > 0)
+			{
+				std::wstring ct(ct_sz / sizeof(wchar_t), L'\0');
+				if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_TYPE,
+				                        nullptr,
+				                        ct.data(), &ct_sz, nullptr))
+				{
+					if (!ct.empty() && ct.back() == L'\0') ct.pop_back();
+					content_type = pf::utf16_to_utf8(ct);
+				}
+			}
+
+			uint64_t content_length = 0;
+			// Query Content-Length as a string and parse to uint64_t to
+			// avoid truncating responses larger than 4 GiB.
+			DWORD cl_sz = 0;
+			WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_LENGTH,
+			                    nullptr, nullptr, &cl_sz, nullptr);
+			if (cl_sz > 0)
+			{
+				std::wstring cl_str(cl_sz / sizeof(wchar_t), L'\0');
+				if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_LENGTH,
+				                        nullptr,
+				                        cl_str.data(), &cl_sz, nullptr))
+				{
+					while (!cl_str.empty() && cl_str.back() == L'\0') cl_str.pop_back();
+					try { content_length = std::stoull(cl_str); }
+					catch (...) { content_length = 0; }
+				}
+			}
+
+			if (cb_copy.on_headers)
+				cb_copy.on_headers(static_cast<int>(status), std::move(content_type), content_length);
+
+			query_data_available();
+		}
+
+		void query_data_available()
+		{
+			HINTERNET req;
+			{
+				std::lock_guard lk(_mtx);
+				if (_cancelled) return;
+				req = _request;
+			}
+			if (!WinHttpQueryDataAvailable(req, nullptr))
+				fail("query data available failed");
+		}
+
+		void on_data_available(const DWORD bytes)
+		{
+			if (bytes == 0)
+			{
+				finish();
+				return;
+			}
+			HINTERNET req;
+			{
+				std::lock_guard lk(_mtx);
+				if (_cancelled) return;
+				req = _request;
+				_read_buf.assign(bytes, 0);
+			}
+			if (!WinHttpReadData(req, _read_buf.data(), bytes, nullptr))
+				fail("read data failed");
+		}
+
+		void on_read_complete(const DWORD bytes)
+		{
+			pf::async_http_callbacks cb_copy;
+			{
+				std::lock_guard lk(_mtx);
+				if (_cancelled) return;
+				cb_copy = _cb;
+			}
+			if (bytes == 0)
+			{
+				finish();
+				return;
+			}
+			if (cb_copy.on_data)
+				cb_copy.on_data(_read_buf.data(), bytes);
+
+			query_data_available();
+		}
+
+		static void CALLBACK s_callback(HINTERNET, const DWORD_PTR ctx,
+		                                const DWORD status,
+		                                LPVOID info, const DWORD info_len)
+		{
+			if (ctx == 0) return;
+			auto* self = reinterpret_cast<win_async_http_request*>(ctx);
+
+			switch (status)
+			{
+			case WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE:
+				self->on_send_complete();
+				break;
+			case WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE:
+				self->on_headers_available();
+				break;
+			case WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE:
+				self->on_data_available(info ? *static_cast<DWORD*>(info) : 0);
+				break;
+			case WINHTTP_CALLBACK_STATUS_READ_COMPLETE:
+				self->on_read_complete(info_len);
+				break;
+			case WINHTTP_CALLBACK_STATUS_REQUEST_ERROR:
+				{
+					std::string err = "winhttp request error";
+					if (info)
+					{
+						const auto* const ar = static_cast<const WINHTTP_ASYNC_RESULT*>(info);
+						err = std::format("winhttp error {} (code {})",
+						                  static_cast<unsigned>(ar->dwResult),
+						                  static_cast<unsigned>(ar->dwError));
+					}
+					self->fail(std::move(err));
+				}
+				break;
+			case WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING:
+				{
+					// Release the keep-alive reference now that WinHTTP has
+					// confirmed the handle is fully closed and no further
+					// callbacks will fire for it. This may delete `self`,
+					// so do nothing else after.
+					std::shared_ptr<win_async_http_request> keep;
+					{
+						std::lock_guard lk(self->_mtx);
+						keep = std::move(self->_self_keep_alive);
+					}
+					(void)keep;
+				}
+				break;
+			default:
+				break;
+			}
+		}
+	};
+
+	class win_async_http_session final : public pf::async_http_session,
+	                                     public std::enable_shared_from_this<win_async_http_session>
+	{
+		HINTERNET _session = nullptr;
+		std::mutex _mtx;
+		std::vector<std::weak_ptr<win_async_http_request>> _requests;
+
+	public:
+		explicit win_async_http_session(const std::wstring& user_agent)
+		{
+			_session = WinHttpOpen(user_agent.c_str(),
+			                       WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+			                       nullptr,
+			                       nullptr,
+			                       WINHTTP_FLAG_ASYNC);
+			if (_session)
+			{
+				// Enable modern TLS. WinHTTP defaults often exclude TLS 1.2/1.3,
+				// causing handshake failures against most modern HTTPS sites.
+				DWORD secure_protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+#ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+				secure_protocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+#endif
+				WinHttpSetOption(_session, WINHTTP_OPTION_SECURE_PROTOCOLS,
+				                 &secure_protocols, sizeof(secure_protocols));
+
+				// Opt in to HTTP/2. Many sites speak only HTTP/2; without
+				// this WinHTTP fails the response with
+				// ERROR_HTTP_INVALID_SERVER_RESPONSE (12152).
+				//
+				// We deliberately do NOT enable HTTP/3: the
+				// WINHTTP_PROTOCOL_FLAG_HTTP3 constant is present in recent
+				// SDK headers but the underlying OS support is gated on
+				// Windows 11 22H2+ and even there negotiation can fail
+				// against many CDNs, surfacing as 12152.
+#ifdef WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL
+				DWORD protocols = WINHTTP_PROTOCOL_FLAG_HTTP2;
+				WinHttpSetOption(_session, WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL,
+				                 &protocols, sizeof(protocols));
+#endif
+
+				DWORD decompress = WINHTTP_DECOMPRESSION_FLAG_ALL;
+				WinHttpSetOption(_session, WINHTTP_OPTION_DECOMPRESSION,
+				                 &decompress, sizeof(decompress));
+				DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+				WinHttpSetOption(_session, WINHTTP_OPTION_REDIRECT_POLICY,
+				                 &redirect, sizeof(redirect));
+			}
+		}
+
+		~win_async_http_session() override
+		{
+			stop();
+			if (_session) WinHttpCloseHandle(_session);
+		}
+
+		pf::async_http_request_ptr get(const std::string_view url, pf::async_http_callbacks cb) override
+		{
+			if (!_session)
+			{
+				if (cb.on_error) cb.on_error("no session");
+				return nullptr;
+			}
+			auto req = std::make_shared<win_async_http_request>();
+			{
+				std::lock_guard lk(_mtx);
+				_requests.emplace_back(req);
+			}
+			req->start(_session, std::string(url), std::move(cb));
+			return req;
+		}
+
+		void stop() override
+		{
+			std::vector<std::weak_ptr<win_async_http_request>> snapshot;
+			{
+				std::lock_guard lk(_mtx);
+				snapshot.swap(_requests);
+			}
+			for (auto& w : snapshot)
+				if (auto p = w.lock()) p->cancel();
+		}
+	};
+}
+
+pf::async_http_session_ptr pf::create_async_http_session(const std::string_view user_agent)
+{
+	const auto agent = user_agent.empty() ? std::wstring(L"PotatoApp/1.0") : utf8_to_utf16(user_agent);
+	return std::make_shared<win_async_http_session>(agent);
+}
+
+//  Toolbar / Address Bar (Win32) â”€
+//
+// A platform-rendered toolbar widget. Implementation is a custom child
+// window that owns:
+//   - a row of icon-font buttons on the left
+//   - an optional editable URL field (real Win32 EDIT subclass) in the middle
+//   - a row of icon-font buttons on the right
+
+namespace
+{
+	// ── Tunable layout constants (logical pixels at 96 DPI) ───────────────
+	// All values are passed through dpi_scale() at the use site so the UI
+	// scales correctly on high-DPI displays.
+
+	// Address-bar EDIT control font (Segoe UI, character height in pt-ish
+	// units; the negative sign is required by CreateFontW to mean
+	// "character height" rather than "cell height").
+	constexpr int k_address_edit_font_size = 16;
+	// Toolbar button glyph font (Segoe Fluent / MDL2 icon font).
+	constexpr int k_toolbar_glyph_font_size = 21;
+	// Outer padding around all toolbar children.
+	constexpr int k_toolbar_padding = 4;
+	// Horizontal inset between the address-bar border rect and the EDIT.
+	constexpr int k_address_edit_inset_x = 6;
+	// Fallback EDIT line height when the font can't be measured.
+	constexpr int k_address_edit_fallback_height = 20;
+	// Suggestion popup row height.
+	constexpr int k_suggest_popup_item_height = 28;
+	// Suggestion popup horizontal text padding.
+	constexpr int k_suggest_popup_text_inset_x = 8;
+
+	// Window-property key used to attach the win_address_bar* to its parent
+	// toolbar HWND (we cannot use GWLP_USERDATA there \u2014 win_impl owns it).
+	constexpr const wchar_t* k_address_bar_prop = L"PotatoAddressBarPtr";
+
+	struct toolbar_btn_runtime
+	{
+		pf::toolbar_button cfg;
+		pf::irect bounds;
+		bool hovered = false;
+	};
+
+	class win_address_bar final : public pf::toolbar_frame,
+	                              public std::enable_shared_from_this<win_address_bar>
+	{
+		std::shared_ptr<win_impl> _frame;
+		pf::address_bar_config _cfg;
+
+		std::vector<toolbar_btn_runtime> _left;
+		std::vector<toolbar_btn_runtime> _right;
+		pf::irect _edit_bounds;
+
+		// Popup menus attached to specific buttons (by id) via set_menu.
+		std::unordered_map<int, std::vector<pf::menu_command>> _button_menus;
+
+		HWND _edit = nullptr;
+		HFONT _edit_font = nullptr;
+		WNDPROC _edit_orig_proc = nullptr;
+		// Subclass on the parent toolbar HWND so we can answer
+		// WM_CTLCOLOREDIT and paint the EDIT background to match the
+		// pale-gray rect drawn behind it.
+		WNDPROC _parent_orig_proc = nullptr;
+		HBRUSH _edit_bg_brush = nullptr;
+
+		// Suggestions dropdown popup. The popup is a borderless WS_POPUP
+		// window with WS_EX_NOACTIVATE so showing / clicking it never moves
+		// keyboard focus away from the EDIT control.
+		HWND _popup_hwnd = nullptr;
+		std::vector<std::string> _popup_items;
+		int _popup_selected = -1; // keyboard selection (-1 = "use edit text")
+		int _popup_hover = -1; // mouse hover index
+		int _popup_item_h = 24;
+
+		// Text the user actually typed (before any popup-driven preview).
+		// Restored when the popup selection moves back to "no selection".
+		std::string _typed_text;
+		// The needle currently used for filtering — stored so the popup
+		// can highlight the matched substring inside each result.
+		std::string _popup_needle;
+		// Edit text at the moment focus was acquired. Restored on Escape
+		// or when the edit loses focus without the user committing a
+		// navigation (e.g. they click back into the page).
+		std::string _focus_original_text;
+		// True between a successful Enter / item-click and the next focus
+		// acquisition; suppresses "restore original" on the WM_KILLFOCUS
+		// that might follow a navigation.
+		bool _committed = false;
+
+		// reactor that forwards Win32 messages (paint/mouse) to us.
+		struct reactor : pf::frame_reactor
+		{
+			win_address_bar* owner = nullptr;
+
+			uint32_t handle_message(pf::window_frame_ptr, pf::message_type m,
+			                        uintptr_t, intptr_t) override
+			{
+				if (m == pf::message_type::erase_background) return 1;
+				return 0;
+			}
+
+			uint32_t handle_mouse(pf::window_frame_ptr, pf::mouse_message_type m,
+			                      const pf::mouse_params& p) override
+			{
+				if (!owner) return 0;
+				switch (m)
+				{
+				case pf::mouse_message_type::mouse_move: owner->on_mouse_move(p.point);
+					break;
+				case pf::mouse_message_type::left_button_down: owner->on_left_down(p.point);
+					break;
+				case pf::mouse_message_type::mouse_leave: owner->on_mouse_leave();
+					break;
+				case pf::mouse_message_type::set_cursor: return 1;
+				default: break;
+				}
+				return 0;
+			}
+
+			void handle_paint(pf::window_frame_ptr&, pf::draw_context& dc) override
+			{
+				if (owner) owner->paint(dc);
+			}
+
+			void handle_size(pf::window_frame_ptr&, pf::isize, pf::measure_context&) override
+			{
+				if (owner) owner->layout();
+			}
+		};
+
+		std::shared_ptr<reactor> _reactor;
+
+		int dpi_scale(const int v) const
+		{
+			return static_cast<int>(v * _frame->get_dpi_scale());
+		}
+
+	public:
+		win_address_bar(std::shared_ptr<win_impl> frame, pf::address_bar_config cfg)
+			: _frame(std::move(frame)), _cfg(std::move(cfg))
+		{
+			for (auto& b : _cfg.left_buttons) _left.push_back({b, {}});
+			for (auto& b : _cfg.right_buttons) _right.push_back({b, {}});
+		}
+
+		void initialise()
+		{
+			_reactor = std::make_shared<reactor>();
+			_reactor->owner = this;
+			_frame->set_reactor(_reactor);
+
+			if (_cfg.style == pf::toolbar_style::address_bar)
+			{
+				_edit = CreateWindowExW(
+					0, L"EDIT", nullptr,
+					WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+					0, 0, 100, 24,
+					_frame->m_hWnd,
+					nullptr,
+					resource_instance,
+					nullptr);
+
+				if (_edit)
+				{
+					if (!_cfg.initial_text.empty())
+						SetWindowTextW(_edit, pf::utf8_to_utf16(_cfg.initial_text).c_str());
+
+					_edit_font = CreateFontW(
+						-dpi_scale(k_address_edit_font_size), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+						DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+						CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS,
+						L"Segoe UI");
+					SendMessageW(_edit, WM_SETFONT, reinterpret_cast<WPARAM>(_edit_font), TRUE);
+
+					SetWindowLongPtrW(_edit, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+					_edit_orig_proc = reinterpret_cast<WNDPROC>(
+						SetWindowLongPtrW(_edit, GWLP_WNDPROC,
+						                  reinterpret_cast<LONG_PTR>(&win_address_bar::s_edit_proc)));
+
+					// Subclass parent so WM_CTLCOLOREDIT can return our
+					// brush, painting the EDIT's background to match the
+					// edit_background rect drawn in paint().
+					//
+					// NOTE: do NOT use GWLP_USERDATA on the parent HWND —
+					// win_impl already stores its own `this` there. Use a
+					// window property instead.
+					_edit_bg_brush = CreateSolidBrush(_cfg.edit_background.rgb());
+					SetPropW(_frame->m_hWnd, k_address_bar_prop,
+					         reinterpret_cast<HANDLE>(this));
+					_parent_orig_proc = reinterpret_cast<WNDPROC>(
+						SetWindowLongPtrW(_frame->m_hWnd, GWLP_WNDPROC,
+						                  reinterpret_cast<LONG_PTR>(&win_address_bar::s_parent_proc)));
+				}
+			}
+
+			layout();
+		}
+
+		~win_address_bar() override
+		{
+			if (_popup_hwnd)
+			{
+				DestroyWindow(_popup_hwnd);
+				_popup_hwnd = nullptr;
+			}
+			if (_edit && _edit_orig_proc)
+				SetWindowLongPtrW(_edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(_edit_orig_proc));
+			if (_parent_orig_proc && _frame)
+			{
+				SetWindowLongPtrW(_frame->m_hWnd, GWLP_WNDPROC,
+				                  reinterpret_cast<LONG_PTR>(_parent_orig_proc));
+				RemovePropW(_frame->m_hWnd, k_address_bar_prop);
+			}
+			if (_edit_font) DeleteObject(_edit_font);
+			if (_edit_bg_brush) DeleteObject(_edit_bg_brush);
+		}
+
+		//  pf::toolbar_frame 
+		pf::window_frame_ptr frame() override { return _frame; }
+
+		int preferred_height() const override
+		{
+			return dpi_scale(_cfg.height);
+		}
+
+		void set_address_text(const std::string_view text) override
+		{
+			if (_edit) SetWindowTextW(_edit, pf::utf8_to_utf16(text).c_str());
+		}
+
+		std::string address_text() const override
+		{
+			if (!_edit) return {};
+			const auto len = GetWindowTextLengthW(_edit);
+			if (len <= 0) return {};
+			std::wstring buf(len + 1, L'\0');
+			GetWindowTextW(_edit, buf.data(), len + 1);
+			buf.resize(len);
+			return pf::utf16_to_utf8(buf);
+		}
+
+		void focus_address() override
+		{
+			if (_edit) SetFocus(_edit);
+		}
+
+		void select_all_address() override
+		{
+			if (_edit) SendMessageW(_edit, EM_SETSEL, 0, -1);
+		}
+
+		void set_button_enabled(const int id, const bool enabled) override
+		{
+			for (auto* group : {&_left, &_right})
+				for (auto& b : *group)
+					if (b.cfg.id == id)
+					{
+						b.cfg.is_enabled = [enabled] { return enabled; };
+					}
+			_frame->invalidate();
+		}
+
+		void set_button_glyph(const int id, const uint32_t glyph) override
+		{
+			for (auto* group : {&_left, &_right})
+				for (auto& b : *group)
+					if (b.cfg.id == id)
+						b.cfg.glyph = glyph;
+			_frame->invalidate();
+		}
+
+		void set_menu(const int button_id, std::vector<pf::menu_command> items) override
+		{
+			if (items.empty())
+				_button_menus.erase(button_id);
+			else
+				_button_menus[button_id] = std::move(items);
+		}
+
+	private:
+		void layout()
+		{
+			const auto rc = _frame->get_client_rect();
+			const int btn_w = dpi_scale(_cfg.button_width);
+			const int padding = dpi_scale(k_toolbar_padding);
+
+			int x = padding;
+			for (auto& b : _left)
+			{
+				b.bounds = pf::irect(x, padding, x + btn_w, rc.bottom - padding);
+				x += btn_w;
+			}
+			const int left_end = x + padding;
+
+			int xr = rc.right - padding;
+			for (auto it = _right.rbegin(); it != _right.rend(); ++it)
+			{
+				it->bounds = pf::irect(xr - btn_w, padding, xr, rc.bottom - padding);
+				xr -= btn_w;
+			}
+			const int right_start = xr - padding;
+
+			_edit_bounds = pf::irect(left_end, padding, right_start, rc.bottom - padding);
+
+			if (_edit && _edit_bounds.width() > 0 && _edit_bounds.height() > 0)
+			{
+				// Measure the EDIT's font so we can size the control to match
+				// a single line of text and centre it vertically inside the
+				// visible border rect. EDIT controls top-align text within
+				// their client area, so the only reliable way to vertically
+				// centre is to make the control itself the height of the text.
+				int text_h = dpi_scale(k_address_edit_fallback_height); // sensible fallback
+				if (_edit_font)
+				{
+					HDC hdc = GetDC(_edit);
+					auto old = static_cast<HFONT>(SelectObject(hdc, _edit_font));
+					TEXTMETRICW tm{};
+					GetTextMetricsW(hdc, &tm);
+					SelectObject(hdc, old);
+					ReleaseDC(_edit, hdc);
+					text_h = tm.tmHeight + tm.tmExternalLeading;
+				}
+
+				const int inset_x = dpi_scale(k_address_edit_inset_x);
+				const int edit_h = text_h;
+				const int edit_y = _edit_bounds.top + (_edit_bounds.height() - edit_h) / 2;
+				MoveWindow(_edit,
+				           _edit_bounds.left + inset_x,
+				           edit_y,
+				           _edit_bounds.width() - inset_x * 2,
+				           edit_h,
+				           TRUE);
+
+				// Remove the EDIT's default left/right margins so text starts
+				// flush against our inset.
+				SendMessageW(_edit, EM_SETMARGINS,
+				             EC_LEFTMARGIN | EC_RIGHTMARGIN,
+				             MAKELPARAM(0, 0));
+			}
+		}
+
+		void paint_button(pf::draw_context& dc, const toolbar_btn_runtime& b)
+		{
+			const bool enabled = !b.cfg.is_enabled || b.cfg.is_enabled();
+			if (b.hovered && enabled)
+				dc.fill_solid_rect(b.bounds, _cfg.button_hover);
+			else
+				dc.fill_solid_rect(b.bounds, _cfg.background);
+
+			if (b.cfg.glyph == 0) return;
+
+			const std::u32string cp_str(1, static_cast<char32_t>(b.cfg.glyph));
+			const auto utf8 = pf::u32_to_utf8(cp_str);
+
+			pf::font f;
+			f.name = pf::font_name::segoe_icons;
+			f.size = dpi_scale(k_toolbar_glyph_font_size);
+
+			const auto sz = dc.measure_text(utf8, f);
+			const int tx = b.bounds.left + (b.bounds.width() - sz.cx) / 2;
+			const int ty = b.bounds.top + (b.bounds.height() - sz.cy) / 2;
+
+			const auto color = enabled ? _cfg.button_color : _cfg.button_color.lighten(80);
+			dc.draw_text(tx, ty, b.bounds, utf8, f,
+			             color,
+			             b.hovered && enabled ? _cfg.button_hover : _cfg.background);
+		}
+
+		void paint(pf::draw_context& dc)
+		{
+			const auto rc = _frame->get_client_rect();
+			dc.fill_solid_rect(rc, _cfg.background);
+
+			if (_cfg.style == pf::toolbar_style::address_bar)
+			{
+				dc.fill_solid_rect(_edit_bounds, _cfg.edit_background);
+				const pf::ipoint pts[5] = {
+					{_edit_bounds.left, _edit_bounds.top},
+					{_edit_bounds.right - 1, _edit_bounds.top},
+					{_edit_bounds.right - 1, _edit_bounds.bottom - 1},
+					{_edit_bounds.left, _edit_bounds.bottom - 1},
+					{_edit_bounds.left, _edit_bounds.top},
+				};
+				dc.draw_lines(std::span<const pf::ipoint>(pts, 5), _cfg.border_color);
+			}
+
+			for (auto& b : _left) paint_button(dc, b);
+			for (auto& b : _right) paint_button(dc, b);
+		}
+
+		void on_mouse_move(const pf::ipoint pt)
+		{
+			bool changed = false;
+			for (auto* group : {&_left, &_right})
+				for (auto& b : *group)
+				{
+					const bool h = b.bounds.contains(pt);
+					if (h != b.hovered)
+					{
+						b.hovered = h;
+						changed = true;
+					}
+				}
+			if (changed)
+			{
+				_frame->invalidate();
+				_frame->track_mouse_leave();
+			}
+		}
+
+		void on_mouse_leave()
+		{
+			bool changed = false;
+			for (auto* group : {&_left, &_right})
+				for (auto& b : *group)
+					if (b.hovered)
+					{
+						b.hovered = false;
+						changed = true;
+					}
+			if (changed) _frame->invalidate();
+		}
+
+		void on_left_down(const pf::ipoint pt)
+		{
+			for (auto* group : {&_left, &_right})
+				for (auto& b : *group)
+				{
+					if (!b.bounds.contains(pt)) continue;
+					if (b.cfg.is_enabled && !b.cfg.is_enabled()) return;
+
+					// If a menu is attached to this button, show it
+					// beneath the button instead of invoking the action.
+					const auto it = _button_menus.find(b.cfg.id);
+					if (it != _button_menus.end() && !it->second.empty())
+					{
+						POINT p{b.bounds.left, b.bounds.bottom};
+						ClientToScreen(_frame->m_hWnd, &p);
+						_frame->show_popup_menu(it->second, pf::ipoint(p.x, p.y));
+						return;
+					}
+
+					if (b.cfg.action) b.cfg.action();
+					return;
+				}
+		}
+
+		// Subclass proc on the EDIT control: drives the suggestions popup
+		// (Enter / Escape / arrows / text changes) and forwards everything
+		// else to the standard EDIT proc.
+		static LRESULT CALLBACK s_edit_proc(HWND h, UINT m, WPARAM w, LPARAM l)
+		{
+			auto* self = reinterpret_cast<win_address_bar*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+			if (!self || !self->_edit_orig_proc)
+				return DefWindowProcW(h, m, w, l);
+
+			if (m == WM_KEYDOWN)
+			{
+				switch (w)
+				{
+				case VK_RETURN:
+					self->choose_selection();
+					return 0;
+				case VK_ESCAPE:
+					// Escape always restores the text the field had when
+					// focus was acquired, hides the popup, and yields
+					// focus back to the content view.
+					self->restore_focus_original();
+					self->hide_suggestions();
+					if (self->_frame)
+					{
+						HWND hp = GetParent(self->_frame->m_hWnd);
+						if (hp) SetFocus(hp);
+					}
+					return 0;
+				case VK_DOWN:
+					if (self->is_popup_visible())
+					{
+						self->move_selection(1);
+						return 0;
+					}
+					break;
+				case VK_UP:
+					if (self->is_popup_visible())
+					{
+						self->move_selection(-1);
+						return 0;
+					}
+					break;
+				default:
+					break;
+				}
+			}
+			if (m == WM_CHAR && (w == VK_RETURN || w == VK_ESCAPE))
+				return 0; // suppress beep
+
+			// Suppress the KEYUP for Enter / Escape that follows our handled
+			// KEYDOWN — otherwise the trailing KEYUP runs through the
+			// EDIT proc and our update_suggestions() call below re-shows
+			// the popup we just hid.
+			if (m == WM_KEYUP && (w == VK_RETURN || w == VK_ESCAPE))
+				return 0;
+
+			// First click into an unfocused EDIT: select the whole URL
+			// instead of positioning the caret. Subsequent clicks (when
+			// the field is already focused) behave normally.
+			if (m == WM_LBUTTONDOWN && GetFocus() != h)
+			{
+				SetFocus(h); // triggers WM_SETFOCUS -> select-all path below
+				return 0;
+			}
+
+			if (m == WM_KILLFOCUS)
+			{
+				self->hide_suggestions();
+				if (!self->_committed)
+					self->restore_focus_original();
+			}
+
+			const auto r = CallWindowProcW(self->_edit_orig_proc, h, m, w, l);
+
+			// On focus, snapshot the text (so Escape / blur can restore
+			// it), select everything, and show the default suggestions
+			// (common bookmarks). Done after the original proc so the
+			// EDIT has finished its own focus handling first.
+			if (m == WM_SETFOCUS)
+			{
+				self->_focus_original_text = self->address_text();
+				self->_typed_text = self->_focus_original_text;
+				self->_committed = false;
+				SendMessageW(h, EM_SETSEL, 0, -1);
+				self->update_suggestions();
+			}
+
+			// Text may have changed â€” refresh suggestions. Skip if the
+			// user has just committed a navigation (the popup must stay
+			// hidden until focus returns to the EDIT).
+			if (!self->_committed && (m == WM_CHAR || m == WM_KEYUP || m == WM_PASTE || m == WM_CUT))
+				self->update_suggestions();
+
+			return r;
+		}
+
+		// Subclass proc on the parent toolbar HWND: only used to answer
+		// WM_CTLCOLOREDIT so the EDIT's own background paint matches the
+		// pale-gray rect we draw behind it. Everything else falls through
+		// to the toolbar's normal reactor-based WndProc.
+		static LRESULT CALLBACK s_parent_proc(HWND h, UINT m, WPARAM w, LPARAM l)
+		{
+			auto* self = reinterpret_cast<win_address_bar*>(GetPropW(h, k_address_bar_prop));
+			if (self && self->_parent_orig_proc)
+			{
+				if (m == WM_CTLCOLOREDIT && reinterpret_cast<HWND>(l) == self->_edit)
+				{
+					const auto hdc = reinterpret_cast<HDC>(w);
+					SetTextColor(hdc, self->_cfg.text_color.rgb());
+					SetBkColor(hdc, self->_cfg.edit_background.rgb());
+					return reinterpret_cast<LRESULT>(self->_edit_bg_brush);
+				}
+				return CallWindowProcW(self->_parent_orig_proc, h, m, w, l);
+			}
+			return DefWindowProcW(h, m, w, l);
+		}
+
+		//  Suggestions popup 
+
+		bool is_popup_visible() const
+		{
+			return _popup_hwnd && IsWindowVisible(_popup_hwnd);
+		}
+
+		void update_suggestions()
+		{
+			if (!_cfg.on_suggest)
+			{
+				hide_suggestions();
+				return;
+			}
+			// Always ask the host for suggestions (including for empty text
+			// — lets the host return common bookmarks on first focus).
+			const auto text = address_text();
+			// Snapshot the user's typed text so move_selection() can
+			// restore it when keyboard navigation returns to "no
+			// selection".
+			_typed_text = text;
+			_popup_needle = text;
+			_popup_items = _cfg.on_suggest(text);
+			if (_popup_items.empty())
+			{
+				hide_suggestions();
+				return;
+			}
+			_popup_selected = -1;
+			_popup_hover = -1;
+			show_suggestions();
+		}
+
+		void show_suggestions()
+		{
+			ensure_suggest_class();
+			if (!_popup_hwnd)
+			{
+				_popup_hwnd = CreateWindowExW(
+					WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+					L"PotatoSuggestPopup", nullptr,
+					WS_POPUP,
+					0, 0, 100, 100,
+					_frame->m_hWnd, nullptr,
+					resource_instance, this);
+				if (!_popup_hwnd) return;
+				SetWindowLongPtrW(_popup_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+			}
+
+			_popup_item_h = dpi_scale(k_suggest_popup_item_height);
+			POINT pt = {_edit_bounds.left, _edit_bounds.bottom};
+			ClientToScreen(_frame->m_hWnd, &pt);
+			const int w = _edit_bounds.width();
+			const int h = static_cast<int>(_popup_items.size()) * _popup_item_h + 2;
+
+			SetWindowPos(_popup_hwnd, HWND_TOPMOST, pt.x, pt.y, w, h,
+			             SWP_NOACTIVATE | SWP_SHOWWINDOW);
+			InvalidateRect(_popup_hwnd, nullptr, FALSE);
+		}
+
+		void hide_suggestions()
+		{
+			_popup_items.clear();
+			_popup_selected = -1;
+			_popup_hover = -1;
+			if (_popup_hwnd && IsWindowVisible(_popup_hwnd))
+				ShowWindow(_popup_hwnd, SW_HIDE);
+		}
+
+		void move_selection(const int delta)
+		{
+			if (_popup_items.empty()) return;
+			const int n = static_cast<int>(_popup_items.size());
+			int sel = _popup_selected + delta;
+			if (sel < -1) sel = n - 1;
+			if (sel >= n) sel = -1;
+			_popup_selected = sel;
+
+			// Mirror the selection into the edit field so the user sees what
+			// pressing Enter would navigate to. When the selection wraps
+			// back to "none", restore the text the user actually typed.
+			if (_edit)
+			{
+				const std::string& preview = (_popup_selected >= 0)
+					? _popup_items[_popup_selected]
+					: _typed_text;
+				SetWindowTextW(_edit, pf::utf8_to_utf16(preview).c_str());
+				SendMessageW(_edit, EM_SETSEL, 0, -1);
+			}
+
+			if (_popup_hwnd) InvalidateRect(_popup_hwnd, nullptr, FALSE);
+		}
+
+		void choose_selection()
+		{
+			std::string url;
+			if (_popup_selected >= 0 && _popup_selected < static_cast<int>(_popup_items.size()))
+				url = _popup_items[_popup_selected];
+			else
+				url = address_text();
+			_committed = true;
+			hide_suggestions();
+			// Move focus off the EDIT before invoking the host callback, so
+			// the page receives keyboard input once it loads (and any
+			// trailing key events don't re-open the suggestions popup).
+			if (_frame)
+			{
+				HWND hp = GetParent(_frame->m_hWnd);
+				if (hp) SetFocus(hp);
+			}
+			if (_cfg.on_navigate) _cfg.on_navigate(url);
+		}
+
+		// Restore the address text that was present when the EDIT
+		// last gained focus. Used by Escape and by the WM_KILLFOCUS
+		// path when no navigation was committed.
+		void restore_focus_original()
+		{
+			if (!_edit) return;
+			SetWindowTextW(_edit, pf::utf8_to_utf16(_focus_original_text).c_str());
+			SendMessageW(_edit, EM_SETSEL, 0, -1);
+		}
+
+		void paint_popup()
+		{
+			PAINTSTRUCT ps;
+			const HDC hdc = BeginPaint(_popup_hwnd, &ps);
+
+			RECT rc;
+			GetClientRect(_popup_hwnd, &rc);
+
+			const auto bg = CreateSolidBrush(_cfg.background.rgb());
+			FillRect(hdc, &rc, bg);
+			DeleteObject(bg);
+
+			const auto border = CreateSolidBrush(_cfg.border_color.rgb());
+			FrameRect(hdc, &rc, border);
+			DeleteObject(border);
+
+			const auto old_font = static_cast<HFONT>(SelectObject(
+				hdc, _edit_font ? _edit_font : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT))));
+			SetBkMode(hdc, TRANSPARENT);
+
+			const int n = static_cast<int>(_popup_items.size());
+
+			// Lower-cased needle for case-insensitive substring matching
+			// (works on the raw UTF-8 bytes — adequate for the ASCII URLs
+			// users typically type into an address bar).
+			std::string needle_lc = _popup_needle;
+			for (auto& c : needle_lc)
+				c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+			for (int i = 0; i < n; ++i)
+			{
+				RECT r{1, 1 + i * _popup_item_h, rc.right - 1, 1 + (i + 1) * _popup_item_h};
+				const bool selected = (i == _popup_selected) || (i == _popup_hover && _popup_selected < 0);
+				if (selected)
+				{
+					const auto hb = CreateSolidBrush(_cfg.button_hover.rgb());
+					FillRect(hdc, &r, hb);
+					DeleteObject(hb);
+				}
+
+				const std::string& item = _popup_items[i];
+				RECT tr = r;
+				tr.left += dpi_scale(k_suggest_popup_text_inset_x);
+				tr.right -= dpi_scale(k_suggest_popup_text_inset_x);
+
+				// Highlight the matched portion (if any) by painting a
+				// yellow band behind it. Drawn before the text so the
+				// transparent-background DrawText overlays cleanly.
+				if (!needle_lc.empty())
+				{
+					std::string item_lc = item;
+					for (auto& c : item_lc)
+						c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+					const auto pos = item_lc.find(needle_lc);
+					if (pos != std::string::npos)
+					{
+						const auto pre = pf::utf8_to_utf16(item.substr(0, pos));
+						const auto mid = pf::utf8_to_utf16(item.substr(pos, needle_lc.size()));
+
+						SIZE sz_pre{}, sz_mid{};
+						GetTextExtentPoint32W(hdc, pre.c_str(),
+						                      static_cast<int>(pre.size()), &sz_pre);
+						GetTextExtentPoint32W(hdc, mid.c_str(),
+						                      static_cast<int>(mid.size()), &sz_mid);
+
+						const long hl_left = tr.left + sz_pre.cx;
+						const long hl_right = std::min<long>(tr.right, hl_left + sz_mid.cx);
+						if (hl_right > hl_left)
+						{
+							RECT hr{hl_left, r.top + 1, hl_right, r.bottom - 1};
+							const auto hb = CreateSolidBrush(RGB(255, 235, 130));
+							FillRect(hdc, &hr, hb);
+							DeleteObject(hb);
+						}
+					}
+				}
+
+				SetTextColor(hdc, _cfg.text_color.rgb());
+				const auto wtext = pf::utf8_to_utf16(item);
+				DrawTextW(hdc, wtext.c_str(), static_cast<int>(wtext.size()), &tr,
+				          DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+			}
+
+			SelectObject(hdc, old_font);
+			EndPaint(_popup_hwnd, &ps);
+		}
+
+		static void ensure_suggest_class()
+		{
+			static bool registered = false;
+			if (registered) return;
+			WNDCLASSEXW wcx = {};
+			wcx.cbSize = sizeof(wcx);
+			wcx.style = CS_SAVEBITS | CS_DROPSHADOW;
+			wcx.lpfnWndProc = &win_address_bar::s_popup_proc;
+			wcx.hInstance = resource_instance;
+			wcx.hCursor = LoadCursor(nullptr, IDC_ARROW);
+			wcx.hbrBackground = nullptr;
+			wcx.lpszClassName = L"PotatoSuggestPopup";
+			RegisterClassExW(&wcx);
+			registered = true;
+		}
+
+		static LRESULT CALLBACK s_popup_proc(HWND h, UINT m, WPARAM w, LPARAM l)
+		{
+			auto* self = reinterpret_cast<win_address_bar*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+
+			switch (m)
+			{
+			case WM_MOUSEACTIVATE:
+				return MA_NOACTIVATE; // never steal focus from the EDIT
+			case WM_ERASEBKGND:
+				return 1;
+			case WM_PAINT:
+				if (self)
+				{
+					self->paint_popup();
+					return 0;
+				}
+				break;
+			case WM_MOUSEMOVE:
+				if (self)
+				{
+					const int y = GET_Y_LPARAM(l);
+					const int idx = self->_popup_item_h > 0 ? (y - 1) / self->_popup_item_h : -1;
+					const int n = static_cast<int>(self->_popup_items.size());
+					const int new_hover = (idx >= 0 && idx < n) ? idx : -1;
+					if (new_hover != self->_popup_hover)
+					{
+						self->_popup_hover = new_hover;
+						InvalidateRect(h, nullptr, FALSE);
+					}
+				}
+				return 0;
+			case WM_LBUTTONDOWN:
+				if (self)
+				{
+					const int y = GET_Y_LPARAM(l);
+					const int idx = self->_popup_item_h > 0 ? (y - 1) / self->_popup_item_h : -1;
+					const int n = static_cast<int>(self->_popup_items.size());
+					if (idx >= 0 && idx < n)
+					{
+						self->_popup_selected = idx;
+						if (self->_edit)
+							SetWindowTextW(self->_edit,
+							               pf::utf8_to_utf16(self->_popup_items[idx]).c_str());
+						self->choose_selection();
+					}
+				}
+				return 0;
+			default:
+				break;
+			}
+			return DefWindowProcW(h, m, w, l);
+		}
+	};
+}
+
+pf::toolbar_frame_ptr win_impl::create_address_bar(const pf::address_bar_config& cfg)
+{
+	auto child = std::static_pointer_cast<win_impl>(create_child("PotatoToolbar", pf::window_style::child |
+	                                                             pf::window_style::visible |
+	                                                             pf::window_style::clip_children, cfg.background));
+	auto bar = std::make_shared<win_address_bar>(child, cfg);
+	bar->initialise();
+	return bar;
+}
+
+pf::toolbar_frame_ptr pf::create_address_bar_for_hwnd(const uintptr_t parent_native_handle,
+                                                      const address_bar_config& cfg)
+{
+	const auto parent = std::bit_cast<HWND>(parent_native_handle);
+	auto child = std::make_shared<win_impl>();
+	child->create_window(L"PotatoToolbar", parent, cfg.background,
+	                     WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0);
+	child->set_self_ref(child);
+	auto bar = std::make_shared<win_address_bar>(child, cfg);
+	bar->initialise();
+	return bar;
 }
