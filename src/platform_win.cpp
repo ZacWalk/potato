@@ -1,7 +1,24 @@
 ﻿// platform_win.cpp â€” Win32 platform layer: entry point, windowing, timers,
 // resources, menus, device context, file dialogs, and spell checking
 
-#include "pch.h"
+#include "platform.h"
+
+#include <algorithm>
+#include <cassert>
+#include <chrono>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <fstream>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #define ISOLATION_AWARE_ENABLED 1
@@ -3906,7 +3923,7 @@ namespace
 
 	// Window-property key used to attach the win_address_bar* to its parent
 	// toolbar HWND (we cannot use GWLP_USERDATA there \u2014 win_impl owns it).
-	constexpr const wchar_t* k_address_bar_prop = L"PotatoAddressBarPtr";
+	constexpr auto k_address_bar_prop = L"PotatoAddressBarPtr";
 
 	struct toolbar_btn_runtime
 	{
@@ -4060,7 +4077,7 @@ namespace
 					// window property instead.
 					_edit_bg_brush = CreateSolidBrush(_cfg.edit_background.rgb());
 					SetPropW(_frame->m_hWnd, k_address_bar_prop,
-					         reinterpret_cast<HANDLE>(this));
+					         this);
 					_parent_orig_proc = reinterpret_cast<WNDPROC>(
 						SetWindowLongPtrW(_frame->m_hWnd, GWLP_WNDPROC,
 						                  reinterpret_cast<LONG_PTR>(&win_address_bar::s_parent_proc)));
@@ -4520,8 +4537,8 @@ namespace
 			if (_edit)
 			{
 				const std::string& preview = (_popup_selected >= 0)
-					? _popup_items[_popup_selected]
-					: _typed_text;
+					                             ? _popup_items[_popup_selected]
+					                             : _typed_text;
 				SetWindowTextW(_edit, pf::utf8_to_utf16(preview).c_str());
 				SendMessageW(_edit, EM_SETSEL, 0, -1);
 			}
