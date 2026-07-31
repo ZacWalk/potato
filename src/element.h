@@ -329,6 +329,34 @@ enum element_type
 };
 
 
+// Specified CSS values, as parsed from the cascade. Roughly a kilobyte, and
+// meaningless for text, space, comment and cdata nodes -- which are the bulk of
+// a document -- so elements only allocate this once something styles them.
+// Unstyled elements read from a shared immutable default.
+struct css_props
+{
+	background bg;
+
+	css_margins margins;
+	css_margins padding;
+	css_borders borders;
+	css_offsets offsets;
+
+	css_length width;
+	css_length height;
+	css_length min_width;
+	css_length min_height;
+	css_length max_width;
+	css_length max_height;
+	css_length text_indent;
+	css_length flex_basis;
+	css_length border_spacing_x;
+	css_length border_spacing_y;
+
+	static const css_props& defaults();
+};
+
+
 class element
 {
 	friend class box;
@@ -360,10 +388,13 @@ protected:
 	std::string m_src;
 	std::string m_tag;
 	style m_style;
-	std::map<std::string, std::string, ltstr> m_attrs;
+	std::map<std::string, std::string, ltstr_sv> m_attrs;
 	vertical_align m_vertical_align;
 	text_align m_text_align;
 	style_display m_display;
+	// Grid is laid out as a block, so remember the distinction long enough to
+	// blockify the children the way a grid container must.
+	bool m_is_grid_container = false;
 	list_style_type m_list_style_type;
 	list_style_position m_list_style_position;
 	white_space m_white_space;
@@ -372,7 +403,7 @@ protected:
 	std::vector<floated_box> m_floats_left;
 	std::vector<floated_box> m_floats_right;
 	std::vector<element*> m_positioned;
-	background m_bg;
+	std::unique_ptr<css_props> m_css;
 	element_position m_el_position;
 	int m_line_height;
 	bool m_lh_predefined;
@@ -385,18 +416,6 @@ protected:
 	pf::font_handle m_font;
 	int m_font_size;
 	font_metrics m_font_metrics;
-
-	css_margins m_css_margins;
-	css_margins m_css_padding;
-	css_borders m_css_borders;
-	css_length m_css_width;
-	css_length m_css_height;
-	css_length m_css_min_width;
-	css_length m_css_min_height;
-	css_length m_css_max_width;
-	css_length m_css_max_height;
-	css_offsets m_css_offsets;
-	css_length m_css_text_indent;
 
 	overflow m_overflow;
 	visibility m_visibility;
@@ -413,19 +432,24 @@ protected:
 	flex_align_items m_flex_align_items;
 	float m_flex_grow;
 	float m_flex_shrink;
-	css_length m_flex_basis;
 	flex_align_items m_flex_align_self;
 	int m_flex_gap;
 
-	// table
-	table_grid m_grid;
-	css_length m_css_border_spacing_x;
-	css_length m_css_border_spacing_y;
+	// table -- only <table> elements ever build a grid, so it is allocated on
+	// first use rather than costing every node in the document.
+	std::unique_ptr<table_grid> m_grid;
 	int m_border_spacing_x;
 	int m_border_spacing_y;
 	border_collapse m_border_collapse;
 
 public:
+	table_grid& grid();
+
+	// Specified CSS values. Reading is always safe; writing through props_mut()
+	// allocates this element's own copy on first use.
+	const css_props& props() const { return m_css ? *m_css : css_props::defaults(); }
+	css_props& props_mut();
+
 	element(document& doc, enum element_type, std::string text = empty);
 	~element();
 
@@ -471,11 +495,13 @@ public:
 	margins get_paddings() const;
 	position get_placement() const;
 	pf::font_handle get_font(font_metrics* fm = nullptr);
-	background* get_background(bool own_only = false);
+	const background* get_background(bool own_only = false);
 
-	bool append_child(std::unique_ptr<element> el);
-	bool append_space(const std::string& val);
-	bool append_text(const std::string& val);
+	// Null when the child was taken; a refused node is handed back so a caller
+	// holding a raw pointer to it can keep that pointer valid.
+	std::unique_ptr<element> append_child(std::unique_ptr<element> el);
+	bool append_space(std::string_view val);
+	bool append_text(std::string_view val);
 
 	bool fetch_positioned();
 	bool find_styles_changes(position::vector& redraw_boxes, int x, int y);
@@ -484,6 +510,8 @@ public:
 	bool is_ancestor(const element* el);
 	bool is_body() const { return m_type == el_body; };
 	bool is_break() const;
+	element_type type() const { return m_type; }
+	bool is_text_node() const { return m_type == el_text || m_type == el_space; }
 	bool is_first_child_inline(const element* el);
 	bool is_floats_holder() const;
 	bool is_last_child_inline(const element* el);
@@ -499,10 +527,10 @@ public:
 	bool on_mouse_over();
 	bool set_pseudo_class(const std::string& pclass, bool add);
 	const std::string& get_tag_name() const { return m_tag; }
-	const std::string get_attr(const std::string& name, const std::string& def = empty) const;
+	std::string_view get_attr(std::string_view name, std::string_view def = {}) const;
 	const std::string get_cursor() const;
-	const std::string get_style_property(const std::string& name, bool inherited,
-	                                     const std::string& def = empty) const;
+	const std::string get_style_property(prop_id name, bool inherited,
+	                                     std::string_view def = {}) const;
 	const std::string get_text() const;
 	css_length get_css_bottom() const;
 	css_length get_css_height() const;
@@ -524,9 +552,9 @@ public:
 	int get_right_floats_height() const;
 	int get_zindex() const;
 	int line_height() const;
-	int place_element(render_win32& renderer, element* el, int max_width);
-	int render(render_win32& renderer, int x, int y, int max_width, bool second_pass = false);
-	int render_inline(render_win32& renderer, element* container, int max_width);
+	int place_element(element* el, int max_width);
+	int render(int x, int y, int max_width, bool second_pass = false);
+	int render_inline(element* container, int max_width);
 	int select(const css_element_selector& selector, bool apply_pseudo = true);
 	int select(const css_selector& selector, bool apply_pseudo = true);
 	overflow get_overflow() const;
@@ -553,7 +581,7 @@ public:
 	void draw_background(render_win32& renderer, int x, int y, const position* clip);
 	void draw_children(render_win32& renderer, int x, int y, const position* clip, draw_flag flag, int zindex);
 	void draw_stacking_context(render_win32& renderer, int x, int y, const position* clip, bool with_positioned);
-	void get_content_size(render_win32& renderer, size& sz, int max_width);
+	void get_content_size(size& sz, int max_width);
 	void get_inline_boxes(position::vector& boxes);
 	void get_line_left_right(int y, int def_right, int& ln_left, int& ln_right);
 	void get_redraw_box(position& pos, int x = 0, int y = 0);
@@ -563,21 +591,21 @@ public:
 	void parse_attributes();
 	void parse_styles(bool is_reparse = false);
 	void refresh_styles();
-	void render_positioned(render_win32& renderer, render_type rt = render_all);
-	void set_attr(const std::string& name, const std::string& val);
+	void render_positioned(render_type rt = render_all);
+	void set_attr(std::string_view name, std::string_view val);
 	void set_css_width(const css_length& w);
-	void set_data(const std::string& data);
-	void set_tag_name(const std::string& tag);
+	void set_data(std::string_view data);
+	void set_tag_name(std::string_view tag);
 	void update_floats(int dy, element* parent);
 	white_space get_white_space() const;
 	void parent(element* par);
 	void skip(bool val);
-	web_color get_color(const char* prop_name, bool inherited, const web_color& def_color = web_color());
+	web_color get_color(prop_id prop_name, bool inherited, const web_color& def_color = web_color());
 
 protected:
-	int fix_line_width(render_win32& renderer, int max_width, element_float flt);
+	int fix_line_width(int max_width, element_float flt);
 	void parse_background();
-	void init_background_paint(render_win32& renderer, position pos, background_paint& bg_paint, const background* bg);
+	void init_background_paint(position pos, background_paint& bg_paint, const background* bg);
 	void draw_list_marker(render_win32& renderer, const position& pos);
 	void parse_nth_child_params(const std::string& param, int& num, int& off);
 	void remove_before_after();

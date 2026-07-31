@@ -164,7 +164,7 @@ static inline const char* next_delim(const char* text, const char* delims)
 	return text;
 }
 
-int value_index(const std::string& val, const char* strings, const int defValue, const char delim)
+int value_index(const std::string_view val, const char* strings, const int defValue, const char delim)
 {
 	assert(!val.empty());
 	assert(delim);
@@ -178,8 +178,8 @@ int value_index(const std::string& val, const char* strings, const int defValue,
 	{
 		const auto delimLen = delim_end - delim_start;
 
-		if (delimLen == val.size() &&
-			_strnicmp(delim_start, val.c_str(), delimLen) == 0)
+		if (static_cast<size_t>(delimLen) == val.size() &&
+			_strnicmp(delim_start, val.data(), delimLen) == 0)
 		{
 			return idx;
 		}
@@ -193,15 +193,136 @@ int value_index(const std::string& val, const char* strings, const int defValue,
 	return defValue;
 }
 
-bool value_in_list(const std::string& val, const char* strings, const char delim)
+bool value_in_list(const std::string_view val, const char* strings, const char delim)
 {
 	return value_index(val, strings, -1, delim) >= 0;
+}
+
+namespace
+{
+	bool is_valid_utf8(const std::string_view s)
+	{
+		size_t i = 0;
+
+		while (i < s.size())
+		{
+			const auto b = static_cast<uint8_t>(s[i]);
+			size_t n;
+
+			if (b < 0x80) n = 1;
+			else if ((b & 0xE0) == 0xC0 && b >= 0xC2) n = 2;
+			else if ((b & 0xF0) == 0xE0) n = 3;
+			else if ((b & 0xF8) == 0xF0 && b <= 0xF4) n = 4;
+			else return false;
+
+			if (i + n > s.size()) return false;
+
+			for (size_t k = 1; k < n; ++k)
+			{
+				if (!pf::is_utf8_continuation(s[i + k])) return false;
+			}
+
+			i += n;
+		}
+
+		return true;
+	}
+
+	// Pull the value of a `charset=` parameter out of a Content-Type header or
+	// a <meta http-equiv> content attribute.
+	std::string_view charset_param(const std::string_view text)
+	{
+		for (size_t i = 0; i + 8 <= text.size(); ++i)
+		{
+			if (_strnicmp(text.data() + i, "charset", 7) != 0) continue;
+
+			size_t p = i + 7;
+			while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) ++p;
+			if (p >= text.size() || text[p] != '=') continue;
+			++p;
+			while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) ++p;
+
+			char quote = 0;
+			if (p < text.size() && (text[p] == '"' || text[p] == '\'')) quote = text[p++];
+
+			const size_t start = p;
+			while (p < text.size())
+			{
+				const char c = text[p];
+				if (quote ? c == quote : c == ';' || c == ' ' || c == '\t' || c == '"' || c == '\'' || c == '>') break;
+				++p;
+			}
+
+			return text.substr(start, p - start);
+		}
+
+		return {};
+	}
+
+	// Look for <meta charset=..> or <meta http-equiv=content-type content=..>
+	// within the leading bytes, as the HTML spec prescribes.
+	std::string_view sniff_meta_charset(const std::string_view bytes)
+	{
+		const auto head = bytes.substr(0, std::min<size_t>(bytes.size(), 1024));
+
+		for (size_t i = 0; i + 6 < head.size(); ++i)
+		{
+			if (head[i] != '<' || _strnicmp(head.data() + i + 1, "meta", 4) != 0) continue;
+
+			size_t end = head.find('>', i);
+			if (end == std::string_view::npos) end = head.size();
+
+			if (const auto cs = charset_param(head.substr(i, end - i)); !cs.empty())
+			{
+				return cs;
+			}
+
+			i = end;
+		}
+
+		return {};
+	}
+}
+
+std::string decode_to_utf8(const std::string_view bytes, const std::string_view content_type)
+{
+	// 1. A byte-order mark wins over everything else.
+	if (bytes.size() >= 3 && memcmp(bytes.data(), "\xEF\xBB\xBF", 3) == 0)
+	{
+		return std::string(bytes.substr(3));
+	}
+
+	if (bytes.size() >= 2)
+	{
+		const auto b0 = static_cast<uint8_t>(bytes[0]);
+		const auto b1 = static_cast<uint8_t>(bytes[1]);
+
+		if (b0 == 0xFF && b1 == 0xFE) return pf::transcode_to_utf8(bytes.substr(2), 1200);
+		if (b0 == 0xFE && b1 == 0xFF) return pf::transcode_to_utf8(bytes.substr(2), 1201);
+	}
+
+	// 2. The transport-level charset, then the in-document declaration.
+	auto charset = charset_param(content_type);
+	if (charset.empty()) charset = sniff_meta_charset(bytes);
+
+	if (!charset.empty())
+	{
+		// An unrecognised label falls through to the heuristic below.
+		if (const auto cp = pf::charset_to_codepage(charset))
+		{
+			return pf::transcode_to_utf8(bytes, cp);
+		}
+	}
+
+	// 3. Nothing usable declared: trust the bytes if they are valid UTF-8,
+	// otherwise fall back to the de-facto legacy default.
+	return is_valid_utf8(bytes) ? std::string(bytes) : pf::transcode_to_utf8(bytes, 1252);
 }
 
 
 std::vector<std::string> split_string(const std::string& strings, const char delim)
 {
-	char delims[2] = {delim, 0};
+	const char delims[2] = {delim, 0};
 	return split_string(strings, delims, "\"'");
 }
 
@@ -682,6 +803,9 @@ std::string run_tests()
 
 	tests.register_test("Should find value index", should_find_value_index);
 	tests.register_test("Should pass css size", should_pass_css_size);
+	register_scanner_tests(tests);
+	register_style_tests(tests);
+	register_layout_tests(tests);
 
 	std::stringstream output;
 	tests.run_tests(output);

@@ -7,7 +7,6 @@
 #include <functional>
 #include <iterator>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -176,9 +175,9 @@ namespace pf
 		return {std::bit_cast<const char*>(val.data()), val.size()};
 	}
 
-	inline std::wstring utf8_to_utf16(const std::string_view s)
+	inline void utf8_to_utf16(const std::string_view s, std::wstring& result)
 	{
-		std::wstring result;
+		result.clear();
 		result.reserve(s.size());
 		auto i = s.begin();
 		while (i < s.end())
@@ -195,6 +194,12 @@ namespace pf
 				result += static_cast<uint16_t>(cp);
 			}
 		}
+	}
+
+	inline std::wstring utf8_to_utf16(const std::string_view s)
+	{
+		std::wstring result;
+		utf8_to_utf16(s, result);
 		return result;
 	}
 
@@ -917,13 +922,20 @@ namespace pf
 	font_handle create_font_handle(const font_def& def, font_metrics_data* out_metrics = nullptr);
 	void delete_font_handle(font_handle h);
 
-	// Measure text or font line height using a previously created handle.
+	// Measure text using a previously created handle.
 	isize measure_text_with_font(font_handle h, std::string_view text);
-	int line_height_for_font(font_handle h);
 
 	// Resolve a (possibly relative) URL against an absolute base URL.
 	// Mirrors the previous shlwapi-based behaviour.
 	std::string resolve_url(std::string_view base, std::string_view rel);
+
+	// Map an IANA/HTML charset label to a platform code page. Returns 0 when
+	// the label is not recognised.
+	uint32_t charset_to_codepage(std::string_view charset);
+
+	// Transcode bytes in the given code page to UTF-8. A code page of 0 (or
+	// CP_UTF8) returns the input unchanged.
+	std::string transcode_to_utf8(std::string_view bytes, uint32_t codepage);
 
 
 	// Measure / Draw contexts
@@ -1323,7 +1335,7 @@ namespace pf
 	{
 		bitmap() = default;
 
-		bitmap(int w, int h, std::vector<uint32_t> px)
+		bitmap(const int w, const int h, std::vector<uint32_t> px)
 		{
 			width = w;
 			height = h;
@@ -1478,6 +1490,9 @@ namespace pf
 struct app_init_result
 {
 	bool start_gui = true;
+	// Run the UI offscreen: a real window with real painting, but never visible
+	// and never focused, so automated runs don't disrupt the desktop.
+	bool offscreen_gui = false;
 	int exit_code = 0;
 };
 

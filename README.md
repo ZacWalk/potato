@@ -6,3 +6,16 @@ Back in the 2000s, I needed to move from C++ to work on a Web project. I wanted 
 Here is what I came up with, probably the worst web browser in the world. I try to keep it working well enough to display Wikipedia. 
 
 No dependencies, Simple Win32 GDI rendering, some CSS but no Javascript support.
+
+Diagnostics
+-----------
+
+Run a page through the normal browser loading and rendering path from the command line:
+
+```
+Exe\potato-64d.exe /eval:https://en.wikipedia.org/wiki/Main_Page
+```
+
+The process exits after network and layout activity settles. It reports navigation and
+resource results, stylesheet selector counts, layout dimensions, and relevant element
+geometry to standard output.

@@ -6,6 +6,24 @@
 #include "document.h"
 
 
+const css_props& css_props::defaults()
+{
+	static const css_props instance;
+	return instance;
+}
+
+css_props& element::props_mut()
+{
+	if (!m_css) m_css = std::make_unique<css_props>();
+	return *m_css;
+}
+
+table_grid& element::grid()
+{
+	if (!m_grid) m_grid = std::make_unique<table_grid>();
+	return *m_grid;
+}
+
 element::element(document& doc, const enum element_type t, std::string text) : m_type(t), m_doc(doc),
                                                                                m_text(std::move(text))
 {
@@ -91,7 +109,7 @@ bool element::is_point_inside(const int x, const int y)
 	return false;
 }
 
-web_color element::get_color(const char* prop_name, const bool inherited, const web_color& def_color)
+web_color element::get_color(const prop_id prop_name, const bool inherited, const web_color& def_color)
 {
 	const auto clrstr = get_style_property(prop_name, inherited);
 
@@ -130,7 +148,7 @@ bool element::is_inline_box() const
 bool element::collapse_top_margin() const
 {
 	if (!m_borders.top && !m_padding.top && in_normal_flow() && get_float() == float_none && m_margins.top >= 0 &&
-		parent())
+		parent() && parent()->get_display() != display_flex && parent()->get_display() != display_inline_flex)
 	{
 		return true;
 	}
@@ -140,7 +158,7 @@ bool element::collapse_top_margin() const
 bool element::collapse_bottom_margin() const
 {
 	if (!m_borders.bottom && !m_padding.bottom && in_normal_flow() && get_float() == float_none && m_margins.bottom >= 0
-		&& parent())
+		&& parent() && parent()->get_display() != display_flex && parent()->get_display() != display_inline_flex)
 	{
 		return true;
 	}
@@ -265,7 +283,7 @@ int element::get_inline_shift_right()
 	return ret;
 }
 
-bool element::append_space(const std::string& val)
+bool element::append_space(const std::string_view val)
 {
 	if (m_type == el_style || m_type == el_script || m_type == el_svg)
 	{
@@ -273,13 +291,13 @@ bool element::append_space(const std::string& val)
 	}
 	else
 	{
-		append_child(std::make_unique<element>(m_doc, el_space, val));
+		append_child(std::make_unique<element>(m_doc, el_space, std::string(val)));
 	}
 
 	return true;
 }
 
-bool element::append_text(const std::string& val)
+bool element::append_text(const std::string_view val)
 {
 	if (m_type == el_style || m_type == el_script || m_type == el_svg)
 	{
@@ -287,54 +305,54 @@ bool element::append_text(const std::string& val)
 	}
 	else
 	{
-		append_child(std::make_unique<element>(m_doc, el_text, val));
+		append_child(std::make_unique<element>(m_doc, el_text, std::string(val)));
 	}
 
 	return true;
 }
 
-bool element::append_child(std::unique_ptr<element> el)
+std::unique_ptr<element> element::append_child(std::unique_ptr<element> el)
 {
 	assert(el);
 
-	if (el)
+	if (!el) return {};
+
+	// SVG elements skip all child elements
+	if (m_type == el_svg)
 	{
-		// SVG elements skip all child elements
-		if (m_type == el_svg)
+		return el;
+	}
+
+	if (m_type == el_table)
+	{
+		const auto& tag = el->get_tag_name();
+
+		if (tag != "tbody" && tag != "thead" && tag != "tfoot" &&
+			tag != "tr" && tag != "caption" && tag != "colgroup")
 		{
-			return true;
-		}
-		if (m_type == el_table)
-		{
-			const auto& tag = el->get_tag_name();
-			if (tag == "tbody" || tag == "thead" || tag == "tfoot" ||
-				tag == "tr" || tag == "caption" || tag == "colgroup")
-			{
-				el->parent(this);
-				m_children.push_back(std::move(el));
-				return true;
-			}
-		}
-		else
-		{
-			el->parent(this);
-			m_children.push_back(std::move(el));
-			return true;
+			return el;
 		}
 	}
 
-	return false;
+	el->parent(this);
+	m_children.push_back(std::move(el));
+	return {};
 }
 
-void element::set_attr(const std::string& k, const std::string& val)
+void element::set_attr(const std::string_view k, const std::string_view val)
 {
-	if (!k.empty() && !val.empty())
+	if (!k.empty())
 	{
-		m_attrs[k] = val;
+		m_attrs[std::string(k)] = val;
+
+		// Selector bucketing reads these in apply_stylesheet, which runs before
+		// parse_styles, so they must be live as soon as the parser sets them.
+		if (is_equal(k, "id")) m_id = val;
+		else if (is_equal(k, "class")) m_class = val;
 	}
 }
 
-const std::string element::get_attr(const std::string& name, const std::string& def) const
+std::string_view element::get_attr(const std::string_view name, const std::string_view def) const
 {
 	const auto attr = m_attrs.find(name);
 
@@ -343,6 +361,45 @@ const std::string element::get_attr(const std::string& name, const std::string& 
 		return attr->second;
 	}
 	return def;
+}
+
+// True when every whitespace-delimited token of `needles` also appears in
+// `haystack`. Allocation-free; both sides are scanned in place.
+static bool contains_all_tokens(const std::string_view haystack, const std::string_view needles)
+{
+	const auto is_space = [](const char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f'; };
+
+	const auto next_token = [&](std::string_view& s) -> std::string_view
+	{
+		while (!s.empty() && is_space(s.front())) s.remove_prefix(1);
+		size_t n = 0;
+		while (n < s.size() && !is_space(s[n])) ++n;
+		const auto tok = s.substr(0, n);
+		s.remove_prefix(n);
+		return tok;
+	};
+
+	auto rest = needles;
+
+	while (true)
+	{
+		const auto needle = next_token(rest);
+		if (needle.empty()) break;
+
+		auto scan = haystack;
+		auto found = false;
+
+		while (!found)
+		{
+			const auto tok = next_token(scan);
+			if (tok.empty()) break;
+			found = is_equal(tok, needle);
+		}
+
+		if (!found) return false;
+	}
+
+	return true;
 }
 
 void element::apply_stylesheet(const css& styles)
@@ -485,7 +542,7 @@ void element::apply_stylesheet(const css& styles)
 	}
 }
 
-void element::get_content_size(render_win32& renderer, size& sz, const int max_width)
+void element::get_content_size(size& sz, const int max_width)
 {
 	if (m_type == el_text || m_type == el_space)
 	{
@@ -493,7 +550,7 @@ void element::get_content_size(render_win32& renderer, size& sz, const int max_w
 	}
 	else if (m_type == el_image)
 	{
-		sz = renderer.get_image_size(m_doc.find_image(m_src));
+		sz = image_size(m_doc.find_image(m_src));
 	}
 	else
 	{
@@ -526,7 +583,7 @@ void element::draw(render_win32& renderer, const int x, const int y, const posit
 		if (pos.does_intersect(clip))
 		{
 			const auto font = m_parent->get_font();
-			const auto color = m_parent->get_color("color", true, m_doc.get_def_color());
+			const auto color = m_parent->get_color(prop_id::color, true, m_doc.get_def_color());
 			renderer.draw_text(m_use_transformed ? m_transformed_text.c_str() : m_text.c_str(), font, color, pos);
 		}
 	}
@@ -546,7 +603,7 @@ void element::draw(render_win32& renderer, const int x, const int y, const posit
 			bg.repeat = background_repeat_no_repeat;
 			bg.image_size.width = pos.width;
 			bg.image_size.height = pos.height;
-			bg.border_radius = m_css_borders.radius;
+			bg.border_radius = props().borders.radius;
 			bg.position_x = pos.x;
 			bg.position_y = pos.y;
 			renderer.draw_background(renderer, bg);
@@ -587,8 +644,8 @@ pf::font_handle element::get_font(font_metrics* fm)
 	return m_font;
 }
 
-const std::string element::get_style_property(const std::string& name, const bool inherited,
-                                              const std::string& def) const
+const std::string element::get_style_property(const prop_id name, const bool inherited,
+                                              const std::string_view def) const
 {
 	if (m_type == el_text || m_type == el_space)
 	{
@@ -596,18 +653,20 @@ const std::string element::get_style_property(const std::string& name, const boo
 		{
 			return m_parent->get_style_property(name, inherited, def);
 		}
-		return def;
+		return std::string(def);
 	}
-	auto result = m_style.get_property(name);
+	auto found = m_style.get_property(name);
 	auto pass_parent = false;
+	auto explicit_inherit = false;
 
 	if (m_parent)
 	{
-		if (!result.empty() && is_equal(result.c_str(), "inherit"))
+		if (!found.empty() && is_equal(found, "inherit"))
 		{
 			pass_parent = true;
+			explicit_inherit = true;
 		}
-		else if (result.empty() && inherited)
+		else if (found.empty() && inherited)
 		{
 			pass_parent = true;
 		}
@@ -615,7 +674,7 @@ const std::string element::get_style_property(const std::string& name, const boo
 
 	if (pass_parent)
 	{
-		const auto parent_ret = m_parent->get_style_property(name, inherited, def);
+		const auto parent_ret = m_parent->get_style_property(name, inherited || explicit_inherit, def);
 
 		if (!parent_ret.empty())
 		{
@@ -623,8 +682,14 @@ const std::string element::get_style_property(const std::string& name, const boo
 		}
 	}
 
-	if (result.empty())
-		result = def;
+	if (found.empty())
+		found = def;
+
+	// The overwhelming majority of values hold no var(), so stop here.
+	if (found.find("var(") == std::string_view::npos)
+		return std::string(found);
+
+	std::string result(found);
 
 	// Resolve var() references (handles nested var() via re-scanning)
 	auto var_pos = result.find("var(");
@@ -686,7 +751,7 @@ void element::parse_styles(const bool is_reparse)
 	if (m_type == el_text || m_type == el_space)
 	{
 		m_text_transform = static_cast<text_transform>(value_index(
-			get_style_property("text-transform", true, "none"),
+			get_style_property(prop_id::text_transform, true, "none"),
 			text_transform_strings, text_transform_none));
 
 		if (m_text_transform != text_transform_none)
@@ -723,7 +788,9 @@ void element::parse_styles(const bool is_reparse)
 		else
 		{
 			m_size.height = fm.height;
-			m_size.width = m_doc.text_width(m_use_transformed ? m_transformed_text.c_str() : m_text.c_str(), font);
+			m_size.width = m_doc.text_width(m_use_transformed
+				                                ? std::string_view(m_transformed_text)
+				                                : std::string_view(m_text), font);
 		}
 
 		m_draw_spaces = fm.draw_spaces;
@@ -734,7 +801,7 @@ void element::parse_styles(const bool is_reparse)
 	m_id = get_attr("id");
 	m_class = get_attr("class");
 
-	const auto& style = get_attr("style");
+	const std::string style(get_attr("style"));
 
 	if (!style.empty())
 	{
@@ -743,37 +810,69 @@ void element::parse_styles(const bool is_reparse)
 
 	init_font();
 
-	m_el_position = static_cast<element_position>(value_index(get_style_property("position", false, "static"),
-	                                                          element_position_strings, element_position_fixed));
-	m_text_align = static_cast<text_align>(value_index(get_style_property("text-align", true, "left"),
+	const auto position_str = get_style_property(prop_id::position, false, "static");
+	m_el_position = position_str == "sticky"
+		                ? element_position_relative
+		                : static_cast<element_position>(value_index(position_str, element_position_strings,
+		                                                            element_position_static));
+	m_text_align = static_cast<text_align>(value_index(get_style_property(prop_id::text_align, true, "left"),
 	                                                   text_align_strings,
 	                                                   text_align_left));
 	{
-		auto overflow_str = get_style_property("overflow", false, "visible");
+		auto overflow_str = get_style_property(prop_id::overflow, false, "visible");
 		const auto sp = overflow_str.find(' ');
 		if (sp != std::string::npos) overflow_str = overflow_str.substr(0, sp);
 		m_overflow = static_cast<overflow>(value_index(overflow_str, overflow_strings, overflow_visible));
 	}
-	m_white_space = static_cast<white_space>(value_index(get_style_property("white-space", true, "normal"),
+	m_white_space = static_cast<white_space>(value_index(get_style_property(prop_id::white_space, true, "normal"),
 	                                                     white_space_strings,
 	                                                     white_space_normal));
-	const auto display_str = get_style_property("display", false, "inline");
+	const auto display_str = get_style_property(prop_id::display, false, "inline");
 	auto display_val = value_index(display_str, style_display_strings, -1);
+
+	m_is_grid_container = false;
 
 	if (display_val < 0)
 	{
 		if (display_str == "grid")
-			display_val = display_flex;
+		{
+			display_val = display_block;
+			m_is_grid_container = true;
+		}
 		else if (display_str == "inline-grid")
-			display_val = display_inline_flex;
+		{
+			display_val = display_inline_block;
+			m_is_grid_container = true;
+		}
+		else if (display_str == "contents")
+		{
+			// No box of its own: the children join the parent's flow. Treating
+			// it as a block keeps them in normal flow at full width, which is
+			// far closer than the inline fallback.
+			display_val = display_block;
+		}
+		else if (display_str == "initial")
+		{
+			display_val = display_inline;
+		}
 		else
 			display_val = display_inline;
 	}
 	m_display = static_cast<style_display>(display_val);
-	m_visibility = static_cast<visibility>(value_index(get_style_property("visibility", true, "visible"),
+
+	// Grid and flex items are blockified (CSS Display 3), so an inline value on
+	// a child of one becomes block rather than collapsing to zero width.
+	if (m_parent && (m_parent->m_is_grid_container ||
+		m_parent->m_display == display_flex || m_parent->m_display == display_inline_flex))
+	{
+		if (m_display == display_inline) m_display = display_block;
+		else if (m_display == display_inline_block) m_display = display_block;
+	}
+
+	m_visibility = static_cast<visibility>(value_index(get_style_property(prop_id::visibility, true, "visible"),
 	                                                   visibility_strings,
 	                                                   visibility_visible));
-	m_box_sizing = static_cast<box_sizing>(value_index(get_style_property("box-sizing", false, "content-box"),
+	m_box_sizing = static_cast<box_sizing>(value_index(get_style_property(prop_id::box_sizing, false, "content-box"),
 	                                                   box_sizing_strings,
 	                                                   box_sizing_content_box));
 
@@ -781,19 +880,19 @@ void element::parse_styles(const bool is_reparse)
 	if (m_display == display_flex || m_display == display_inline_flex)
 	{
 		m_flex_direction = static_cast<flex_direction>(value_index(
-			get_style_property("flex-direction", false, "row"),
+			get_style_property(prop_id::flex_direction, false, "row"),
 			flex_direction_strings, flex_direction_row));
 		m_flex_wrap = static_cast<flex_wrap>(value_index(
-			get_style_property("flex-wrap", false, "nowrap"),
+			get_style_property(prop_id::flex_wrap, false, "nowrap"),
 			flex_wrap_strings, flex_wrap_nowrap));
 		m_flex_justify_content = static_cast<flex_justify_content>(value_index(
-			get_style_property("justify-content", false, "flex-start"),
+			get_style_property(prop_id::justify_content, false, "flex-start"),
 			flex_justify_content_strings, flex_justify_content_flex_start));
 		m_flex_align_items = static_cast<flex_align_items>(value_index(
-			get_style_property("align-items", false, "stretch"),
+			get_style_property(prop_id::align_items, false, "stretch"),
 			flex_align_items_strings, flex_align_items_stretch));
 
-		const auto gap_str = get_style_property("gap", false, "0");
+		const auto gap_str = get_style_property(prop_id::gap, false, "0");
 		css_length gap_len;
 		gap_len.fromString(gap_str, "0");
 		m_doc.cvt_units(gap_len, m_font_size);
@@ -810,14 +909,14 @@ void element::parse_styles(const bool is_reparse)
 
 	// Parse flex item properties
 	{
-		const auto fg = get_style_property("flex-grow", false, "0");
+		const auto fg = get_style_property(prop_id::flex_grow, false, "0");
 		m_flex_grow = safe_stof(fg);
-		const auto fs = get_style_property("flex-shrink", false, "1");
+		const auto fs = get_style_property(prop_id::flex_shrink, false, "1");
 		m_flex_shrink = safe_stof(fs);
-		m_flex_basis.fromString(get_style_property("flex-basis", false, "auto"), "auto");
-		m_doc.cvt_units(m_flex_basis, m_font_size);
+		props_mut().flex_basis.fromString(get_style_property(prop_id::flex_basis, false, "auto"), "auto");
+		m_doc.cvt_units(props_mut().flex_basis, m_font_size);
 		m_flex_align_self = static_cast<flex_align_items>(value_index(
-			get_style_property("align-self", false, "auto"),
+			get_style_property(prop_id::align_self, false, "auto"),
 			flex_align_items_strings, -1));
 		if (static_cast<int>(m_flex_align_self) < 0)
 			m_flex_align_self = flex_align_items_stretch; // "auto" inherits from parent
@@ -825,7 +924,7 @@ void element::parse_styles(const bool is_reparse)
 
 	if (m_el_position != element_position_static)
 	{
-		const auto val = get_style_property("z-index", false);
+		const auto val = get_style_property(prop_id::z_index, false);
 
 		if (!val.empty())
 		{
@@ -833,13 +932,13 @@ void element::parse_styles(const bool is_reparse)
 		}
 	}
 
-	const auto va = get_style_property("vertical-align", true, "baseline");
+	const auto va = get_style_property(prop_id::vertical_align, true, "baseline");
 	m_vertical_align = static_cast<vertical_align>(value_index(va, vertical_align_strings, va_baseline));
 
-	const auto fl = get_style_property("float", false, "none");
+	const auto fl = get_style_property(prop_id::float_, false, "none");
 	m_float = static_cast<element_float>(value_index(fl, element_float_strings, float_none));
 
-	m_clear = static_cast<element_clear>(value_index(get_style_property("clear", false, "none"),
+	m_clear = static_cast<element_clear>(value_index(get_style_property(prop_id::clear, false, "none"),
 	                                                 element_clear_strings,
 	                                                 clear_none));
 
@@ -855,124 +954,126 @@ void element::parse_styles(const bool is_reparse)
 		}
 	}
 
-	m_css_text_indent.fromString(get_style_property("text-indent", true, "0"), "0");
+	props_mut().text_indent.fromString(get_style_property(prop_id::text_indent, true, "0"), "0");
 
-	m_css_width.fromString(get_style_property("width", false, "auto"), "auto");
-	m_css_height.fromString(get_style_property("height", false, "auto"), "auto");
+	props_mut().width.fromString(get_style_property(prop_id::width, false, "auto"), "auto");
+	props_mut().height.fromString(get_style_property(prop_id::height, false, "auto"), "auto");
 
-	m_doc.cvt_units(m_css_width, m_font_size);
-	m_doc.cvt_units(m_css_height, m_font_size);
+	m_doc.cvt_units(props_mut().width, m_font_size);
+	m_doc.cvt_units(props_mut().height, m_font_size);
 
-	m_css_min_width.fromString(get_style_property("min-width", false, "0"));
-	m_css_min_height.fromString(get_style_property("min-height", false, "0"));
+	props_mut().min_width.fromString(get_style_property(prop_id::min_width, false, "0"));
+	props_mut().min_height.fromString(get_style_property(prop_id::min_height, false, "0"));
 
-	m_css_max_width.fromString(get_style_property("max-width", false, "none"), "none");
-	m_css_max_height.fromString(get_style_property("max-height", false, "none"), "none");
+	props_mut().max_width.fromString(get_style_property(prop_id::max_width, false, "none"), "none");
+	props_mut().max_height.fromString(get_style_property(prop_id::max_height, false, "none"), "none");
 
-	m_doc.cvt_units(m_css_min_width, m_font_size);
-	m_doc.cvt_units(m_css_min_height, m_font_size);
+	m_doc.cvt_units(props_mut().min_width, m_font_size);
+	m_doc.cvt_units(props_mut().min_height, m_font_size);
 
-	m_css_offsets.left.fromString(get_style_property("left", false, "auto"), "auto");
-	m_css_offsets.right.fromString(get_style_property("right", false, "auto"), "auto");
-	m_css_offsets.top.fromString(get_style_property("top", false, "auto"), "auto");
-	m_css_offsets.bottom.fromString(get_style_property("bottom", false, "auto"), "auto");
+	props_mut().offsets.left.fromString(get_style_property(prop_id::left, false, "auto"), "auto");
+	props_mut().offsets.right.fromString(get_style_property(prop_id::right, false, "auto"), "auto");
+	props_mut().offsets.top.fromString(get_style_property(prop_id::top, false, "auto"), "auto");
+	props_mut().offsets.bottom.fromString(get_style_property(prop_id::bottom, false, "auto"), "auto");
 
-	m_doc.cvt_units(m_css_offsets.left, m_font_size);
-	m_doc.cvt_units(m_css_offsets.right, m_font_size);
-	m_doc.cvt_units(m_css_offsets.top, m_font_size);
-	m_doc.cvt_units(m_css_offsets.bottom, m_font_size);
+	m_doc.cvt_units(props_mut().offsets.left, m_font_size);
+	m_doc.cvt_units(props_mut().offsets.right, m_font_size);
+	m_doc.cvt_units(props_mut().offsets.top, m_font_size);
+	m_doc.cvt_units(props_mut().offsets.bottom, m_font_size);
 
-	m_css_margins.left.fromString(get_style_property("margin-left", false, "0"), "auto");
-	m_css_margins.right.fromString(get_style_property("margin-right", false, "0"), "auto");
-	m_css_margins.top.fromString(get_style_property("margin-top", false, "0"), "auto");
-	m_css_margins.bottom.fromString(get_style_property("margin-bottom", false, "0"), "auto");
+	props_mut().margins.left.fromString(get_style_property(prop_id::margin_left, false, "0"), "auto");
+	props_mut().margins.right.fromString(get_style_property(prop_id::margin_right, false, "0"), "auto");
+	props_mut().margins.top.fromString(get_style_property(prop_id::margin_top, false, "0"), "auto");
+	props_mut().margins.bottom.fromString(get_style_property(prop_id::margin_bottom, false, "0"), "auto");
 
-	m_css_padding.left.fromString(get_style_property("padding-left", false, "0"));
-	m_css_padding.right.fromString(get_style_property("padding-right", false, "0"));
-	m_css_padding.top.fromString(get_style_property("padding-top", false, "0"));
-	m_css_padding.bottom.fromString(get_style_property("padding-bottom", false, "0"));
+	props_mut().padding.left.fromString(get_style_property(prop_id::padding_left, false, "0"));
+	props_mut().padding.right.fromString(get_style_property(prop_id::padding_right, false, "0"));
+	props_mut().padding.top.fromString(get_style_property(prop_id::padding_top, false, "0"));
+	props_mut().padding.bottom.fromString(get_style_property(prop_id::padding_bottom, false, "0"));
 
-	m_css_borders.left.width.fromString(get_style_property("border-left-width", false, "medium"),
-	                                    border_width_strings);
-	m_css_borders.right.width.fromString(get_style_property("border-right-width", false, "medium"),
-	                                     border_width_strings);
-	m_css_borders.top.width.fromString(get_style_property("border-top-width", false, "medium"),
-	                                   border_width_strings);
-	m_css_borders.bottom.width.fromString(get_style_property("border-bottom-width", false, "medium"),
-	                                      border_width_strings);
+	props_mut().borders.left.width.fromString(get_style_property(prop_id::border_left_width, false, "medium"),
+	                                          border_width_strings);
+	props_mut().borders.right.width.fromString(get_style_property(prop_id::border_right_width, false, "medium"),
+	                                           border_width_strings);
+	props_mut().borders.top.width.fromString(get_style_property(prop_id::border_top_width, false, "medium"),
+	                                         border_width_strings);
+	props_mut().borders.bottom.width.fromString(get_style_property(prop_id::border_bottom_width, false, "medium"),
+	                                            border_width_strings);
 
-	m_css_borders.left.color = web_color::from_string(get_style_property("border-left-color", false));
-	m_css_borders.left.style = static_cast<border_style>(value_index(
-		get_style_property("border-left-style", false, "none"),
+	props_mut().borders.left.color = web_color::from_string(get_style_property(prop_id::border_left_color, false));
+	props_mut().borders.left.style = static_cast<border_style>(value_index(
+		get_style_property(prop_id::border_left_style, false, "none"),
 		border_style_strings, border_style_none));
 
-	m_css_borders.right.color = web_color::from_string(get_style_property("border-right-color", false));
-	m_css_borders.right.style = static_cast<border_style>(value_index(
-		get_style_property("border-right-style", false, "none"),
+	props_mut().borders.right.color = web_color::from_string(get_style_property(prop_id::border_right_color, false));
+	props_mut().borders.right.style = static_cast<border_style>(value_index(
+		get_style_property(prop_id::border_right_style, false, "none"),
 		border_style_strings, border_style_none));
 
-	m_css_borders.top.color = web_color::from_string(get_style_property("border-top-color", false));
-	m_css_borders.top.style = static_cast<border_style>(value_index(
-		get_style_property("border-top-style", false, "none"),
+	props_mut().borders.top.color = web_color::from_string(get_style_property(prop_id::border_top_color, false));
+	props_mut().borders.top.style = static_cast<border_style>(value_index(
+		get_style_property(prop_id::border_top_style, false, "none"),
 		border_style_strings, border_style_none));
 
-	m_css_borders.bottom.color = web_color::from_string(get_style_property("border-bottom-color", false));
-	m_css_borders.bottom.style = static_cast<border_style>(value_index(
-		get_style_property("border-bottom-style", false, "none"),
+	props_mut().borders.bottom.color = web_color::from_string(get_style_property(prop_id::border_bottom_color, false));
+	props_mut().borders.bottom.style = static_cast<border_style>(value_index(
+		get_style_property(prop_id::border_bottom_style, false, "none"),
 		border_style_strings, border_style_none));
 
-	m_css_borders.radius.top_left_x.fromString(get_style_property("border-top-left-radius-x", false, "0"));
-	m_css_borders.radius.top_left_y.fromString(get_style_property("border-top-left-radius-y", false, "0"));
+	props_mut().borders.radius.top_left_x.fromString(get_style_property(prop_id::border_top_left_radius_x, false, "0"));
+	props_mut().borders.radius.top_left_y.fromString(get_style_property(prop_id::border_top_left_radius_y, false, "0"));
 
-	m_css_borders.radius.top_right_x.fromString(get_style_property("border-top-right-radius-x", false, "0"));
-	m_css_borders.radius.top_right_y.fromString(get_style_property("border-top-right-radius-y", false, "0"));
+	props_mut().borders.radius.top_right_x.fromString(
+		get_style_property(prop_id::border_top_right_radius_x, false, "0"));
+	props_mut().borders.radius.top_right_y.fromString(
+		get_style_property(prop_id::border_top_right_radius_y, false, "0"));
 
-	m_css_borders.radius.bottom_right_x.fromString(
-		get_style_property("border-bottom-right-radius-x", false, "0"));
-	m_css_borders.radius.bottom_right_y.fromString(
-		get_style_property("border-bottom-right-radius-y", false, "0"));
+	props_mut().borders.radius.bottom_right_x.fromString(
+		get_style_property(prop_id::border_bottom_right_radius_x, false, "0"));
+	props_mut().borders.radius.bottom_right_y.fromString(
+		get_style_property(prop_id::border_bottom_right_radius_y, false, "0"));
 
-	m_css_borders.radius.bottom_left_x.
-	              fromString(get_style_property("border-bottom-left-radius-x", false, "0"));
-	m_css_borders.radius.bottom_left_y.
-	              fromString(get_style_property("border-bottom-left-radius-y", false, "0"));
+	props_mut().borders.radius.bottom_left_x.
+	            fromString(get_style_property(prop_id::border_bottom_left_radius_x, false, "0"));
+	props_mut().borders.radius.bottom_left_y.
+	            fromString(get_style_property(prop_id::border_bottom_left_radius_y, false, "0"));
 
-	m_doc.cvt_units(m_css_borders.radius.bottom_left_x, m_font_size);
-	m_doc.cvt_units(m_css_borders.radius.bottom_left_y, m_font_size);
-	m_doc.cvt_units(m_css_borders.radius.bottom_right_x, m_font_size);
-	m_doc.cvt_units(m_css_borders.radius.bottom_right_y, m_font_size);
-	m_doc.cvt_units(m_css_borders.radius.top_left_x, m_font_size);
-	m_doc.cvt_units(m_css_borders.radius.top_left_y, m_font_size);
-	m_doc.cvt_units(m_css_borders.radius.top_right_x, m_font_size);
-	m_doc.cvt_units(m_css_borders.radius.top_right_y, m_font_size);
+	m_doc.cvt_units(props_mut().borders.radius.bottom_left_x, m_font_size);
+	m_doc.cvt_units(props_mut().borders.radius.bottom_left_y, m_font_size);
+	m_doc.cvt_units(props_mut().borders.radius.bottom_right_x, m_font_size);
+	m_doc.cvt_units(props_mut().borders.radius.bottom_right_y, m_font_size);
+	m_doc.cvt_units(props_mut().borders.radius.top_left_x, m_font_size);
+	m_doc.cvt_units(props_mut().borders.radius.top_left_y, m_font_size);
+	m_doc.cvt_units(props_mut().borders.radius.top_right_x, m_font_size);
+	m_doc.cvt_units(props_mut().borders.radius.top_right_y, m_font_size);
 
-	m_doc.cvt_units(m_css_text_indent, m_font_size);
+	m_doc.cvt_units(props_mut().text_indent, m_font_size);
 
-	m_margins.left = m_doc.cvt_units(m_css_margins.left, m_font_size);
-	m_margins.right = m_doc.cvt_units(m_css_margins.right, m_font_size);
-	m_margins.top = m_doc.cvt_units(m_css_margins.top, m_font_size);
-	m_margins.bottom = m_doc.cvt_units(m_css_margins.bottom, m_font_size);
+	m_margins.left = m_doc.cvt_units(props_mut().margins.left, m_font_size);
+	m_margins.right = m_doc.cvt_units(props_mut().margins.right, m_font_size);
+	m_margins.top = m_doc.cvt_units(props_mut().margins.top, m_font_size);
+	m_margins.bottom = m_doc.cvt_units(props_mut().margins.bottom, m_font_size);
 
-	m_padding.left = m_doc.cvt_units(m_css_padding.left, m_font_size);
-	m_padding.right = m_doc.cvt_units(m_css_padding.right, m_font_size);
-	m_padding.top = m_doc.cvt_units(m_css_padding.top, m_font_size);
-	m_padding.bottom = m_doc.cvt_units(m_css_padding.bottom, m_font_size);
+	m_padding.left = m_doc.cvt_units(props_mut().padding.left, m_font_size);
+	m_padding.right = m_doc.cvt_units(props_mut().padding.right, m_font_size);
+	m_padding.top = m_doc.cvt_units(props_mut().padding.top, m_font_size);
+	m_padding.bottom = m_doc.cvt_units(props_mut().padding.bottom, m_font_size);
 
-	m_borders.left = m_css_borders.left.style == border_style_none
+	m_borders.left = props().borders.left.style == border_style_none
 		                 ? 0
-		                 : m_doc.cvt_units(m_css_borders.left.width, m_font_size);
-	m_borders.right = m_css_borders.right.style == border_style_none
+		                 : m_doc.cvt_units(props_mut().borders.left.width, m_font_size);
+	m_borders.right = props().borders.right.style == border_style_none
 		                  ? 0
-		                  : m_doc.cvt_units(m_css_borders.right.width, m_font_size);
-	m_borders.top = m_css_borders.top.style == border_style_none
+		                  : m_doc.cvt_units(props_mut().borders.right.width, m_font_size);
+	m_borders.top = props().borders.top.style == border_style_none
 		                ? 0
-		                : m_doc.cvt_units(m_css_borders.top.width, m_font_size);
-	m_borders.bottom = m_css_borders.bottom.style == border_style_none
+		                : m_doc.cvt_units(props_mut().borders.top.width, m_font_size);
+	m_borders.bottom = props().borders.bottom.style == border_style_none
 		                   ? 0
-		                   : m_doc.cvt_units(m_css_borders.bottom.width, m_font_size);
+		                   : m_doc.cvt_units(props_mut().borders.bottom.width, m_font_size);
 
 	css_length line_height;
-	line_height.fromString(get_style_property("line-height", true, "normal"), "normal");
+	line_height.fromString(get_style_property(prop_id::line_height, true, "normal"), "normal");
 
 	if (line_height.is_predefined())
 	{
@@ -992,20 +1093,20 @@ void element::parse_styles(const bool is_reparse)
 
 	if (m_display == display_list_item)
 	{
-		const auto list_type = get_style_property("list-style-type", true, "disc");
+		const auto list_type = get_style_property(prop_id::list_style_type, true, "disc");
 		m_list_style_type = static_cast<list_style_type>(value_index(list_type, list_style_type_strings,
 		                                                             list_style_type_disc));
 
-		const auto list_pos = get_style_property("list-style-position", true, "outside");
+		const auto list_pos = get_style_property(prop_id::list_style_position, true, "outside");
 		m_list_style_position = static_cast<list_style_position>(value_index(
 			list_pos, list_style_position_strings, list_style_position_outside));
 
-		const auto list_image = get_style_property("list-style-image", true);
+		const auto list_image = get_style_property(prop_id::list_style_image, true);
 
 		if (!list_image.empty())
 		{
 			const auto url = css::parse_css_url(list_image);
-			const auto list_image_baseurl = get_style_property("list-style-image-baseurl", true);
+			const auto list_image_baseurl = get_style_property(prop_id::list_style_image_baseurl, true);
 
 			m_doc.load_image(url, list_image_baseurl);
 		}
@@ -1027,17 +1128,17 @@ void element::parse_styles(const bool is_reparse)
 	if (m_type == el_table)
 	{
 		m_border_collapse = static_cast<border_collapse>(value_index(
-			get_style_property("border-collapse", true, "separate"),
+			get_style_property(prop_id::border_collapse, true, "separate"),
 			border_collapse_strings, border_collapse_separate));
 
 		if (m_border_collapse == border_collapse_separate)
 		{
-			m_css_border_spacing_x.fromString(get_style_property("-potato-border-spacing-x", true, "0px"));
-			m_css_border_spacing_y.fromString(get_style_property("-potato-border-spacing-y", true, "0px"));
+			props_mut().border_spacing_x.fromString(get_style_property(prop_id::potato_border_spacing_x, true, "0px"));
+			props_mut().border_spacing_y.fromString(get_style_property(prop_id::potato_border_spacing_y, true, "0px"));
 
 			const int fntsz = get_font_size();
-			m_border_spacing_x = m_doc.cvt_units(m_css_border_spacing_x, fntsz);
-			m_border_spacing_y = m_doc.cvt_units(m_css_border_spacing_y, fntsz);
+			m_border_spacing_x = m_doc.cvt_units(props_mut().border_spacing_x, fntsz);
+			m_border_spacing_y = m_doc.cvt_units(props_mut().border_spacing_y, fntsz);
 		}
 		else
 		{
@@ -1047,10 +1148,10 @@ void element::parse_styles(const bool is_reparse)
 			m_padding.top = 0;
 			m_padding.left = 0;
 			m_padding.right = 0;
-			m_css_padding.bottom.set_value(0, css_units_px);
-			m_css_padding.top.set_value(0, css_units_px);
-			m_css_padding.left.set_value(0, css_units_px);
-			m_css_padding.right.set_value(0, css_units_px);
+			props_mut().padding.bottom.set_value(0, css_units_px);
+			props_mut().padding.top.set_value(0, css_units_px);
+			props_mut().padding.left.set_value(0, css_units_px);
+			props_mut().padding.right.set_value(0, css_units_px);
 		}
 	}
 	else if (m_type == el_image)
@@ -1066,7 +1167,7 @@ void element::parse_styles(const bool is_reparse)
 	}
 }
 
-int element::render(render_win32& renderer, int x, int y, int max_width, bool second_pass)
+int element::render(int x, int y, int max_width, bool second_pass)
 {
 	if (m_type == el_text || m_type == el_space)
 	{
@@ -1077,11 +1178,11 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		int parent_width = max_width;
 
 		// reset auto margins
-		if (m_css_margins.left.is_predefined())
+		if (props().margins.left.is_predefined())
 		{
 			m_margins.left = 0;
 		}
-		if (m_css_margins.right.is_predefined())
+		if (props().margins.right.is_predefined())
 		{
 			m_margins.right = 0;
 		}
@@ -1094,15 +1195,15 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 
 		def_value<int> block_width(0);
 
-		if (!m_css_width.is_predefined())
+		if (!props().width.is_predefined())
 		{
 			max_width = block_width = calc_width(parent_width - (content_margins_left() + content_margins_right()));
 		}
 
 		// Apply max-width to table
-		if (!m_css_max_width.is_predefined())
+		if (!props().max_width.is_predefined())
 		{
-			int mw = m_doc.cvt_units(m_css_max_width, m_font_size, parent_width);
+			int mw = m_doc.cvt_units(props_mut().max_width, m_font_size, parent_width);
 			mw -= content_margins_left() + content_margins_right();
 			if (max_width > mw) max_width = mw;
 			if (!block_width.is_default() && block_width > mw) block_width = mw;
@@ -1121,21 +1222,21 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		int table_width_spacing = 0;
 		if (m_border_collapse == border_collapse_separate)
 		{
-			table_width_spacing = m_border_spacing_x * (m_grid.cols_count() + 1);
+			table_width_spacing = m_border_spacing_x * (grid().cols_count() + 1);
 		}
 		else
 		{
 			table_width_spacing = 0;
 
-			if (m_grid.cols_count())
+			if (grid().cols_count())
 			{
-				table_width_spacing -= std::min(border_left(), m_grid.column(0).border_left);
-				table_width_spacing -= std::min(border_right(), m_grid.column(m_grid.cols_count() - 1).border_right);
+				table_width_spacing -= std::min(border_left(), grid().column(0).border_left);
+				table_width_spacing -= std::min(border_right(), grid().column(grid().cols_count() - 1).border_right);
 			}
 
-			for (int col = 1; col < m_grid.cols_count(); col++)
+			for (int col = 1; col < grid().cols_count(); col++)
 			{
-				table_width_spacing -= std::min(m_grid.column(col).border_left, m_grid.column(col - 1).border_right);
+				table_width_spacing -= std::min(grid().column(col).border_left, grid().column(col - 1).border_right);
 			}
 		}
 
@@ -1146,15 +1247,15 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		// 
 		// Also, calculate the "maximum" cell width of each cell: formatting the content without breaking lines other than where explicit line breaks occur.
 
-		if (m_grid.cols_count() == 1 && !block_width.is_default())
+		if (grid().cols_count() == 1 && !block_width.is_default())
 		{
-			for (int row = 0; row < m_grid.rows_count(); row++)
+			for (int row = 0; row < grid().rows_count(); row++)
 			{
-				table_cell* cell = m_grid.cell(0, row);
+				table_cell* cell = grid().cell(0, row);
 				if (cell && cell->el)
 				{
 					cell->min_width = cell->max_width = cell->el->render(
-						renderer, 0, 0, max_width - table_width_spacing);
+						0, 0, max_width - table_width_spacing);
 					cell->el->m_pos.width = cell->min_width - cell->el->content_margins_left() - cell->el->
 						content_margins_right();
 				}
@@ -1162,18 +1263,18 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		}
 		else
 		{
-			for (int row = 0; row < m_grid.rows_count(); row++)
+			for (int row = 0; row < grid().rows_count(); row++)
 			{
-				for (int col = 0; col < m_grid.cols_count(); col++)
+				for (int col = 0; col < grid().cols_count(); col++)
 				{
-					table_cell* cell = m_grid.cell(col, row);
+					table_cell* cell = grid().cell(col, row);
 					if (cell && cell->el)
 					{
-						if (!m_grid.column(col).css_width.is_predefined() && m_grid.column(col).css_width.units() !=
+						if (!grid().column(col).css_width.is_predefined() && grid().column(col).css_width.units() !=
 							css_units_percentage)
 						{
-							int css_w = m_grid.column(col).css_width.calc_percent(block_width);
-							int el_w = cell->el->render(renderer, 0, 0, css_w);
+							int css_w = grid().column(col).css_width.calc_percent(block_width);
+							int el_w = cell->el->render(0, 0, css_w);
 							cell->min_width = cell->max_width = std::max(css_w, el_w);
 							cell->el->m_pos.width = cell->min_width - cell->el->content_margins_left() - cell->el->
 								content_margins_right();
@@ -1181,9 +1282,9 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 						else
 						{
 							// calculate minimum content width
-							cell->min_width = cell->el->render(renderer, 0, 0, 1);
+							cell->min_width = cell->el->render(0, 0, 1);
 							// calculate maximum content width
-							cell->max_width = cell->el->render(renderer, 0, 0, max_width - table_width_spacing);
+							cell->max_width = cell->el->render(0, 0, max_width - table_width_spacing);
 						}
 					}
 				}
@@ -1194,18 +1295,18 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		// The minimum is that required by the cell with the largest minimum cell width (or the column 'width', whichever is larger). 
 		// The maximum is that required by the cell with the largest maximum cell width (or the column 'width', whichever is larger).
 
-		for (int col = 0; col < m_grid.cols_count(); col++)
+		for (int col = 0; col < grid().cols_count(); col++)
 		{
-			m_grid.column(col).max_width = 0;
-			m_grid.column(col).min_width = 0;
-			for (int row = 0; row < m_grid.rows_count(); row++)
+			grid().column(col).max_width = 0;
+			grid().column(col).min_width = 0;
+			for (int row = 0; row < grid().rows_count(); row++)
 			{
-				if (m_grid.cell(col, row)->colspan <= 1)
+				if (grid().cell(col, row)->colspan <= 1)
 				{
-					m_grid.column(col).max_width = std::max(m_grid.column(col).max_width,
-					                                        m_grid.cell(col, row)->max_width);
-					m_grid.column(col).min_width = std::max(m_grid.column(col).min_width,
-					                                        m_grid.cell(col, row)->min_width);
+					grid().column(col).max_width = std::max(grid().column(col).max_width,
+					                                        grid().cell(col, row)->max_width);
+					grid().column(col).min_width = std::max(grid().column(col).min_width,
+					                                        grid().cell(col, row)->min_width);
 				}
 			}
 		}
@@ -1214,28 +1315,28 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		// they are at least as wide as the cell. Do the same for the maximum widths. 
 		// If possible, widen all spanned columns by approximately the same amount.
 
-		for (int col = 0; col < m_grid.cols_count(); col++)
+		for (int col = 0; col < grid().cols_count(); col++)
 		{
-			for (int row = 0; row < m_grid.rows_count(); row++)
+			for (int row = 0; row < grid().rows_count(); row++)
 			{
-				if (m_grid.cell(col, row)->colspan > 1)
+				if (grid().cell(col, row)->colspan > 1)
 				{
-					int max_total_width = m_grid.column(col).max_width;
-					int min_total_width = m_grid.column(col).min_width;
-					for (int col2 = col + 1; col2 < col + m_grid.cell(col, row)->colspan; col2++)
+					int max_total_width = grid().column(col).max_width;
+					int min_total_width = grid().column(col).min_width;
+					for (int col2 = col + 1; col2 < col + grid().cell(col, row)->colspan; col2++)
 					{
-						max_total_width += m_grid.column(col2).max_width;
-						min_total_width += m_grid.column(col2).min_width;
+						max_total_width += grid().column(col2).max_width;
+						min_total_width += grid().column(col2).min_width;
 					}
-					if (min_total_width < m_grid.cell(col, row)->min_width)
+					if (min_total_width < grid().cell(col, row)->min_width)
 					{
-						m_grid.distribute_min_width(m_grid.cell(col, row)->min_width - min_total_width, col,
-						                            col + m_grid.cell(col, row)->colspan - 1);
+						grid().distribute_min_width(grid().cell(col, row)->min_width - min_total_width, col,
+						                            col + grid().cell(col, row)->colspan - 1);
 					}
-					if (max_total_width < m_grid.cell(col, row)->max_width)
+					if (max_total_width < grid().cell(col, row)->max_width)
 					{
-						m_grid.distribute_max_width(m_grid.cell(col, row)->max_width - max_total_width, col,
-						                            col + m_grid.cell(col, row)->colspan - 1);
+						grid().distribute_max_width(grid().cell(col, row)->max_width - max_total_width, col,
+						                            col + grid().cell(col, row)->colspan - 1);
 					}
 				}
 			}
@@ -1254,49 +1355,49 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 
 		if (!block_width.is_default())
 		{
-			table_width = m_grid.calc_table_width(block_width - table_width_spacing, false);
+			table_width = grid().calc_table_width(block_width - table_width_spacing, false);
 		}
 		else
 		{
-			table_width = m_grid.calc_table_width(max_width - table_width_spacing, true);
+			table_width = grid().calc_table_width(max_width - table_width_spacing, true);
 		}
 
 		table_width += table_width_spacing;
-		m_grid.calc_horizontal_positions(m_borders, m_border_collapse, m_border_spacing_x);
+		grid().calc_horizontal_positions(m_borders, m_border_collapse, m_border_spacing_x);
 
 		bool row_span_found = false;
 
 		// render cells with computed width
-		for (int row = 0; row < m_grid.rows_count(); row++)
+		for (int row = 0; row < grid().rows_count(); row++)
 		{
-			m_grid.row(row).height = 0;
-			for (int col = 0; col < m_grid.cols_count(); col++)
+			grid().row(row).height = 0;
+			for (int col = 0; col < grid().cols_count(); col++)
 			{
-				table_cell* cell = m_grid.cell(col, row);
+				table_cell* cell = grid().cell(col, row);
 				if (cell->el)
 				{
 					int span_col = col + cell->colspan - 1;
-					if (span_col >= m_grid.cols_count())
+					if (span_col >= grid().cols_count())
 					{
-						span_col = m_grid.cols_count() - 1;
+						span_col = grid().cols_count() - 1;
 					}
-					int cell_width = m_grid.column(span_col).right - m_grid.column(col).left;
+					int cell_width = grid().column(span_col).right - grid().column(col).left;
 
 					if (cell->el->m_pos.width != cell_width - cell->el->content_margins_left() - cell->el->
 						content_margins_right())
 					{
-						cell->el->render(renderer, m_grid.column(col).left, 0, cell_width);
+						cell->el->render(grid().column(col).left, 0, cell_width);
 						cell->el->m_pos.width = cell_width - cell->el->content_margins_left() - cell->el->
 							content_margins_right();
 					}
 					else
 					{
-						cell->el->m_pos.x = m_grid.column(col).left + cell->el->content_margins_left();
+						cell->el->m_pos.x = grid().column(col).left + cell->el->content_margins_left();
 					}
 
 					if (cell->rowspan <= 1)
 					{
-						m_grid.row(row).height = std::max(m_grid.row(row).height, cell->el->height());
+						grid().row(row).height = std::max(grid().row(row).height, cell->el->height());
 					}
 					else
 					{
@@ -1308,28 +1409,28 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 
 		if (row_span_found)
 		{
-			for (int col = 0; col < m_grid.cols_count(); col++)
+			for (int col = 0; col < grid().cols_count(); col++)
 			{
-				for (int row = 0; row < m_grid.rows_count(); row++)
+				for (int row = 0; row < grid().rows_count(); row++)
 				{
-					table_cell* cell = m_grid.cell(col, row);
+					table_cell* cell = grid().cell(col, row);
 					if (cell->el)
 					{
 						int span_row = row + cell->rowspan - 1;
-						if (span_row >= m_grid.rows_count())
+						if (span_row >= grid().rows_count())
 						{
-							span_row = m_grid.rows_count() - 1;
+							span_row = grid().rows_count() - 1;
 						}
 						if (span_row != row)
 						{
 							int h = 0;
 							for (int i = row; i <= span_row; i++)
 							{
-								h += m_grid.row(i).height;
+								h += grid().row(i).height;
 							}
 							if (h < cell->el->height())
 							{
-								m_grid.row(span_row).height += cell->el->height() - h;
+								grid().row(span_row).height += cell->el->height() - h;
 							}
 						}
 					}
@@ -1337,26 +1438,26 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 			}
 		}
 
-		m_grid.calc_vertical_positions(m_borders, m_border_collapse, m_border_spacing_y);
+		grid().calc_vertical_positions(m_borders, m_border_collapse, m_border_spacing_y);
 
 		int table_height = 0;
 		// place cells vertically
-		for (int col = 0; col < m_grid.cols_count(); col++)
+		for (int col = 0; col < grid().cols_count(); col++)
 		{
-			for (int row = 0; row < m_grid.rows_count(); row++)
+			for (int row = 0; row < grid().rows_count(); row++)
 			{
-				table_cell* cell = m_grid.cell(col, row);
+				table_cell* cell = grid().cell(col, row);
 				if (cell->el)
 				{
 					int span_row = row + cell->rowspan - 1;
-					if (span_row >= m_grid.rows_count())
+					if (span_row >= grid().rows_count())
 					{
-						span_row = m_grid.rows_count() - 1;
+						span_row = grid().rows_count() - 1;
 					}
-					cell->el->m_pos.y = m_grid.row(row).top + cell->el->content_margins_top();
-					cell->el->m_pos.height = m_grid.row(span_row).bottom - m_grid.row(row).top - cell->el->
+					cell->el->m_pos.y = grid().row(row).top + cell->el->content_margins_top();
+					cell->el->m_pos.height = grid().row(span_row).bottom - grid().row(row).top - cell->el->
 						content_margins_top() - cell->el->content_margins_bottom();
-					table_height = std::max(table_height, m_grid.row(span_row).bottom);
+					table_height = std::max(table_height, grid().row(span_row).bottom);
 					cell->el->apply_vertical_align();
 				}
 			}
@@ -1364,9 +1465,9 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 
 		if (m_border_collapse == border_collapse_collapse)
 		{
-			if (m_grid.rows_count())
+			if (grid().rows_count())
 			{
-				table_height -= std::min(border_bottom(), m_grid.row(m_grid.rows_count() - 1).border_bottom);
+				table_height -= std::min(border_bottom(), grid().row(grid().rows_count() - 1).border_bottom);
 			}
 		}
 		else
@@ -1391,25 +1492,25 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		int parent_width = max_width;
 
 		// restore margins after collapse
-		m_margins.top = m_doc.cvt_units(m_css_margins.top, m_font_size);
-		m_margins.bottom = m_doc.cvt_units(m_css_margins.bottom, m_font_size);
+		m_margins.top = m_doc.cvt_units(props_mut().margins.top, m_font_size);
+		m_margins.bottom = m_doc.cvt_units(props_mut().margins.bottom, m_font_size);
 
 		m_pos.move_to(x, y);
 
-		auto sz = renderer.get_image_size(m_doc.find_image(m_src));
+		auto sz = image_size(m_doc.find_image(m_src));
 
 		m_pos.width = sz.width;
 		m_pos.height = sz.height;
 
-		if (m_css_height.is_predefined() && m_css_width.is_predefined())
+		if (props().height.is_predefined() && props().width.is_predefined())
 		{
 			m_pos.height = sz.height;
 			m_pos.width = sz.width;
 
 			// check for max-height
-			if (!m_css_max_width.is_predefined())
+			if (!props().max_width.is_predefined())
 			{
-				int max_width = m_doc.cvt_units(m_css_max_width, m_font_size, parent_width);
+				int max_width = m_doc.cvt_units(props_mut().max_width, m_font_size, parent_width);
 				if (m_pos.width > max_width)
 				{
 					m_pos.width = max_width;
@@ -1426,9 +1527,9 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 			}
 
 			// check for max-height
-			if (!m_css_max_height.is_predefined())
+			if (!props().max_height.is_predefined())
 			{
-				int max_height = m_doc.cvt_units(m_css_max_height, m_font_size);
+				int max_height = m_doc.cvt_units(props_mut().max_height, m_font_size);
 				if (m_pos.height > max_height)
 				{
 					m_pos.height = max_height;
@@ -1444,14 +1545,14 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 				}
 			}
 		}
-		else if (!m_css_height.is_predefined() && m_css_width.is_predefined())
+		else if (!props().height.is_predefined() && props().width.is_predefined())
 		{
-			m_pos.height = static_cast<int>(m_css_height.val());
+			m_pos.height = static_cast<int>(props().height.val());
 
 			// check for max-height
-			if (!m_css_max_height.is_predefined())
+			if (!props().max_height.is_predefined())
 			{
-				int max_height = m_doc.cvt_units(m_css_max_height, m_font_size);
+				int max_height = m_doc.cvt_units(props_mut().max_height, m_font_size);
 				if (m_pos.height > max_height)
 				{
 					m_pos.height = max_height;
@@ -1468,14 +1569,14 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 				m_pos.width = sz.width;
 			}
 		}
-		else if (m_css_height.is_predefined() && !m_css_width.is_predefined())
+		else if (props().height.is_predefined() && !props().width.is_predefined())
 		{
-			m_pos.width = m_css_width.calc_percent(parent_width);
+			m_pos.width = props().width.calc_percent(parent_width);
 
 			// check for max-width
-			if (!m_css_max_width.is_predefined())
+			if (!props().max_width.is_predefined())
 			{
-				int max_width = m_doc.cvt_units(m_css_max_width, m_font_size, parent_width);
+				int max_width = m_doc.cvt_units(props_mut().max_width, m_font_size, parent_width);
 				if (m_pos.width > max_width)
 				{
 					m_pos.width = max_width;
@@ -1494,13 +1595,13 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		}
 		else
 		{
-			m_pos.width = m_css_width.calc_percent(parent_width);
-			m_pos.height = static_cast<int>(m_css_height.val());
+			m_pos.width = props().width.calc_percent(parent_width);
+			m_pos.height = static_cast<int>(props().height.val());
 
 			// check for max-height
-			if (!m_css_max_height.is_predefined())
+			if (!props().max_height.is_predefined())
 			{
-				int max_height = m_doc.cvt_units(m_css_max_height, m_font_size);
+				int max_height = m_doc.cvt_units(props_mut().max_height, m_font_size);
 				if (m_pos.height > max_height)
 				{
 					m_pos.height = max_height;
@@ -1508,9 +1609,9 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 			}
 
 			// check for max-height
-			if (!m_css_max_width.is_predefined())
+			if (!props().max_width.is_predefined())
 			{
-				int max_width = m_doc.cvt_units(m_css_max_width, m_font_size, parent_width);
+				int max_width = m_doc.cvt_units(props_mut().max_width, m_font_size, parent_width);
 				if (m_pos.width > max_width)
 				{
 					m_pos.width = max_width;
@@ -1529,23 +1630,23 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 	{
 		int parent_width = max_width;
 
-		m_margins.top = m_doc.cvt_units(m_css_margins.top, m_font_size);
-		m_margins.bottom = m_doc.cvt_units(m_css_margins.bottom, m_font_size);
+		m_margins.top = m_doc.cvt_units(props_mut().margins.top, m_font_size);
+		m_margins.bottom = m_doc.cvt_units(props_mut().margins.bottom, m_font_size);
 
 		m_pos.move_to(x, y);
 
 		// Use CSS width/height (set from attributes in parse_attributes)
-		m_pos.width = m_css_width.is_predefined() ? 24 : static_cast<int>(m_css_width.val());
-		m_pos.height = m_css_height.is_predefined() ? 24 : static_cast<int>(m_css_height.val());
+		m_pos.width = props().width.is_predefined() ? 24 : static_cast<int>(props().width.val());
+		m_pos.height = props().height.is_predefined() ? 24 : static_cast<int>(props().height.val());
 
-		if (!m_css_max_width.is_predefined())
+		if (!props().max_width.is_predefined())
 		{
-			int mw = m_doc.cvt_units(m_css_max_width, m_font_size, parent_width);
+			int mw = m_doc.cvt_units(props_mut().max_width, m_font_size, parent_width);
 			if (m_pos.width > mw) m_pos.width = mw;
 		}
-		if (!m_css_max_height.is_predefined())
+		if (!props().max_height.is_predefined())
 		{
-			int mh = m_doc.cvt_units(m_css_max_height, m_font_size);
+			int mh = m_doc.cvt_units(props_mut().max_height, m_font_size);
 			if (m_pos.height > mh) m_pos.height = mh;
 		}
 
@@ -1560,11 +1661,11 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 	{
 		int parent_width = max_width;
 
-		m_margins.top = m_doc.cvt_units(m_css_margins.top, m_font_size, max_width);
-		m_margins.bottom = m_doc.cvt_units(m_css_margins.bottom, m_font_size, max_width);
+		m_margins.top = m_doc.cvt_units(props_mut().margins.top, m_font_size, max_width);
+		m_margins.bottom = m_doc.cvt_units(props_mut().margins.bottom, m_font_size, max_width);
 
-		if (m_css_margins.left.is_predefined()) m_margins.left = 0;
-		if (m_css_margins.right.is_predefined()) m_margins.right = 0;
+		if (props().margins.left.is_predefined()) m_margins.left = 0;
+		if (props().margins.right.is_predefined()) m_margins.right = 0;
 
 		m_pos.clear();
 		m_pos.move_to(x, y);
@@ -1573,7 +1674,7 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 
 		def_value<int> block_width(0);
 
-		if (!m_css_width.is_predefined())
+		if (!props().width.is_predefined())
 		{
 			int w = calc_width(parent_width);
 			if (m_box_sizing == box_sizing_border_box)
@@ -1586,9 +1687,9 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 				max_width -= content_margins_left() + content_margins_right();
 		}
 
-		if (!m_css_max_width.is_predefined())
+		if (!props().max_width.is_predefined())
 		{
-			int mw = m_doc.cvt_units(m_css_max_width, m_font_size, parent_width);
+			int mw = m_doc.cvt_units(props_mut().max_width, m_font_size, parent_width);
 			if (m_box_sizing == box_sizing_border_box)
 				mw -= m_padding.left + m_borders.left + m_padding.right + m_borders.right;
 			if (max_width > mw) max_width = mw;
@@ -1605,6 +1706,7 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		{
 			element* el;
 			int base_size;
+			int min_main;
 			int cross_size;
 			float grow;
 			float shrink;
@@ -1614,13 +1716,71 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 
 		std::vector<flex_item> items;
 
+		std::function<int(const element*)> max_content_width = [&](const element* root)
+		{
+			if (root->is_text_node() || root->is_replaced()) return root->width();
+
+			const bool row_flex = (root->m_display == display_flex || root->m_display == display_inline_flex) &&
+				(root->m_flex_direction == flex_direction_row || root->m_flex_direction == flex_direction_row_reverse);
+			int content_width = 0;
+
+			if (row_flex)
+			{
+				int visible_count = 0;
+				for (const auto& child : root->m_children)
+				{
+					if (child->is_white_space()) continue;
+					if (!child->is_text_node() && !child->is_visible()) continue;
+					content_width += max_content_width(child.get());
+					++visible_count;
+				}
+				content_width += root->m_flex_gap * std::max(0, visible_count - 1);
+			}
+			else
+			{
+				int inline_width = 0;
+				for (const auto& child : root->m_children)
+				{
+					if (!child->is_text_node() && !child->is_visible()) continue;
+					const int child_width = max_content_width(child.get());
+					if (child->is_text_node() || child->is_inline_box())
+					{
+						inline_width += child_width;
+					}
+					else
+					{
+						content_width = std::max(content_width, inline_width);
+						content_width = std::max(content_width, child_width);
+						inline_width = 0;
+					}
+				}
+				content_width = std::max(content_width, inline_width);
+			}
+
+			return content_width + root->content_margins_left() + root->content_margins_right();
+		};
+
+		std::function<int(const element*)> min_content_width = [&](const element* root)
+		{
+			if (root->is_text_node() || root->is_replaced()) return root->width();
+			int content_width = 0;
+			for (const auto& child : root->m_children)
+			{
+				if (child->is_white_space()) continue;
+				if (!child->is_text_node() && !child->is_visible()) continue;
+				content_width = std::max(content_width, min_content_width(child.get()));
+			}
+			return content_width + root->content_margins_left() + root->content_margins_right();
+		};
+
 		for (const auto& child : m_children)
 		{
+			if (child->is_white_space()) continue;
 			if (child->get_display() == display_none) continue;
 			auto child_pos = child->get_element_position();
 			if (child_pos == element_position_absolute || child_pos == element_position_fixed)
 			{
-				child->render(renderer, 0, 0, max_width);
+				child->render(0, 0, max_width);
 				continue;
 			}
 
@@ -1628,30 +1788,39 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 			fi.el = child.get();
 			fi.grow = child->m_flex_grow;
 			fi.shrink = child->m_flex_shrink;
+			fi.min_main = 0;
 
 			// Determine base size
-			if (!child->m_flex_basis.is_predefined() && child->m_flex_basis.val() > 0)
+			if (!child->props().flex_basis.is_predefined() && child->props().flex_basis.val() > 0)
 			{
-				fi.base_size = static_cast<int>(child->m_flex_basis.val());
+				fi.base_size = child->props().flex_basis.units() == css_units_percentage && is_row
+					               ? child->props().flex_basis.calc_percent(max_width)
+					               : static_cast<int>(child->props().flex_basis.val());
 			}
-			else if (!child->m_css_width.is_predefined() && is_row)
+			else if (!child->props().width.is_predefined() && is_row)
 			{
 				fi.base_size = child->calc_width(max_width);
 			}
-			else if (!child->m_css_height.is_predefined() && !is_row)
+			else if (!child->props().height.is_predefined() && !is_row)
 			{
-				fi.base_size = static_cast<int>(child->m_css_height.val());
+				fi.base_size = static_cast<int>(child->props().height.val());
 			}
 			else
 			{
 				// Render to measure intrinsic size
-				int rendered = child->render(renderer, 0, 0, is_row ? max_width : max_width);
+				int rendered = child->render(0, 0, is_row ? 0 : max_width);
 				fi.base_size = is_row
-					               ? child->width() + child->content_margins_left() + child->content_margins_right()
+					               ? std::max(rendered, max_content_width(child.get()))
 					               : child->height() + child->content_margins_top() + child->content_margins_bottom();
 			}
 
 			fi.final_main = fi.base_size;
+			if (is_row)
+			{
+				const auto min_width = child->get_style_property(prop_id::min_width, false);
+				if (min_width.empty() || min_width == "auto")
+					fi.min_main = min_content_width(child.get());
+			}
 			fi.cross_size = 0;
 			fi.final_cross = 0;
 			items.push_back(fi);
@@ -1736,18 +1905,30 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 			}
 			else if (free_space < 0)
 			{
-				float total_shrink = 0;
-				for (int i = line.start; i < line.end; i++)
-					total_shrink += items[i].shrink;
-
-				if (total_shrink > 0)
+				int deficit = -free_space;
+				while (deficit > 0)
 				{
+					float total_shrink = 0;
 					for (int i = line.start; i < line.end; i++)
 					{
-						int shrink_amount = static_cast<int>(static_cast<float>(-free_space) * items[i].shrink /
-							total_shrink);
-						items[i].final_main = std::max(0, items[i].base_size - shrink_amount);
+						if (items[i].final_main > items[i].min_main)
+							total_shrink += items[i].shrink * static_cast<float>(items[i].base_size);
 					}
+					if (total_shrink <= 0) break;
+
+					int removed = 0;
+					for (int i = line.start; i < line.end; i++)
+					{
+						if (items[i].final_main <= items[i].min_main) continue;
+						const float scaled_shrink = items[i].shrink * static_cast<float>(items[i].base_size);
+						const int share = std::max(1, static_cast<int>(static_cast<float>(deficit) * scaled_shrink /
+							total_shrink));
+						const int shrink_amount = std::min(share, items[i].final_main - items[i].min_main);
+						items[i].final_main -= shrink_amount;
+						removed += shrink_amount;
+					}
+					if (removed == 0) break;
+					deficit -= std::min(deficit, removed);
 				}
 			}
 		}
@@ -1760,15 +1941,14 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 				int item_content_width = item.final_main - item.el->content_margins_left() - item.el->
 					content_margins_right();
 				if (item_content_width < 0) item_content_width = 0;
-				item.el->render(renderer, 0, 0, item_content_width);
+				item.el->render(0, 0, item.final_main);
 				item.el->m_pos.width = item_content_width;
-				item.cross_size = item.el->height() + item.el->content_margins_top() + item.el->
-					content_margins_bottom();
+				item.cross_size = item.el->height();
 			}
 			else
 			{
-				item.el->render(renderer, 0, 0, max_width);
-				item.cross_size = item.el->width() + item.el->content_margins_left() + item.el->content_margins_right();
+				item.el->render(0, 0, max_width);
+				item.cross_size = item.el->width();
 			}
 		}
 
@@ -1864,7 +2044,7 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 					// Approximate: treat as flex-start
 					break;
 				case flex_align_items_stretch:
-					if (is_row && item.el->m_css_height.is_predefined())
+					if (is_row && item.el->props().height.is_predefined())
 					{
 						int stretch_h = line.max_cross - item.el->content_margins_top() - item.el->
 							content_margins_bottom();
@@ -1894,7 +2074,10 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		// Set container size
 		if (is_row)
 		{
-			m_pos.width = max_width;
+			int used_width = 0;
+			for (const auto& line : lines)
+				used_width = std::max(used_width, line.total_main);
+			m_pos.width = max_width > 0 ? max_width : used_width;
 
 			int total_height = 0;
 			for (const auto& line : lines)
@@ -1919,25 +2102,25 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		}
 
 		// Apply min/max height
-		if (!m_css_min_height.is_predefined())
+		if (!props().min_height.is_predefined())
 		{
-			int min_h = m_doc.cvt_units(m_css_min_height, m_font_size);
+			int min_h = m_doc.cvt_units(props_mut().min_height, m_font_size);
 			if (m_pos.height < min_h) m_pos.height = min_h;
 		}
-		if (!m_css_max_height.is_predefined())
+		if (!props().max_height.is_predefined())
 		{
-			int max_h = m_doc.cvt_units(m_css_max_height, m_font_size);
+			int max_h = m_doc.cvt_units(props_mut().max_height, m_font_size);
 			if (m_pos.height > max_h) m_pos.height = max_h;
 		}
-		if (!m_css_height.is_predefined())
+		if (!props().height.is_predefined())
 		{
-			m_pos.height = m_doc.cvt_units(m_css_height, m_font_size);
+			m_pos.height = m_doc.cvt_units(props_mut().height, m_font_size);
 		}
 
 		calc_outlines(parent_width);
 
 		// Handle auto margins for centering
-		if (m_css_margins.left.is_predefined() && m_css_margins.right.is_predefined())
+		if (props().margins.left.is_predefined() && props().margins.right.is_predefined())
 		{
 			int extra = parent_width - m_pos.width - content_margins_left() - content_margins_right();
 			if (extra > 0)
@@ -1953,15 +2136,15 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 	int parent_width = max_width;
 
 	// restore margins after collapse
-	m_margins.top = m_doc.cvt_units(m_css_margins.top, m_font_size, max_width);
-	m_margins.bottom = m_doc.cvt_units(m_css_margins.bottom, m_font_size, max_width);
+	m_margins.top = m_doc.cvt_units(props_mut().margins.top, m_font_size, max_width);
+	m_margins.bottom = m_doc.cvt_units(props_mut().margins.bottom, m_font_size, max_width);
 
 	// reset auto margins
-	if (m_css_margins.left.is_predefined())
+	if (props().margins.left.is_predefined())
 	{
 		m_margins.left = 0;
 	}
-	if (m_css_margins.right.is_predefined())
+	if (props().margins.right.is_predefined())
 	{
 		m_margins.right = 0;
 	}
@@ -1976,7 +2159,7 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 
 	def_value<int> block_width(0);
 
-	if (m_display != display_table_cell && !m_css_width.is_predefined())
+	if (m_display != display_table_cell && !props().width.is_predefined())
 	{
 		int w = calc_width(parent_width);
 		if (m_box_sizing == box_sizing_border_box)
@@ -1994,9 +2177,9 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 	}
 
 	// check for max-width
-	if (!m_css_max_width.is_predefined())
+	if (!props().max_width.is_predefined())
 	{
-		int mw = m_doc.cvt_units(m_css_max_width, m_font_size, parent_width);
+		int mw = m_doc.cvt_units(props_mut().max_width, m_font_size, parent_width);
 		if (m_box_sizing == box_sizing_border_box)
 		{
 			mw -= m_padding.left + m_borders.left + m_padding.right + m_borders.right;
@@ -2023,7 +2206,7 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 			continue
 				;
 
-		int rw = place_element(renderer, el.get(), max_width);
+		int rw = place_element(el.get(), max_width);
 		if (rw > ret_width)
 		{
 			ret_width = rw;
@@ -2066,6 +2249,12 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		}
 	}
 
+	if ((m_tag == "input" || m_tag == "textarea" || m_tag == "select" || m_tag == "button") &&
+		props().height.is_predefined())
+	{
+		m_pos.height = std::max(m_pos.height, m_line_height);
+	}
+
 	// add the floats height to the block height
 	if (is_floats_holder())
 	{
@@ -2089,19 +2278,19 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 	}
 
 	int min_height = 0;
-	if (!m_css_min_height.is_predefined() && m_css_min_height.units() == css_units_percentage)
+	if (!props().min_height.is_predefined() && props().min_height.units() == css_units_percentage)
 	{
 		if (m_parent)
 		{
 			if (m_parent->get_predefined_height(block_height))
 			{
-				min_height = m_css_min_height.calc_percent(block_height);
+				min_height = props().min_height.calc_percent(block_height);
 			}
 		}
 	}
 	else
 	{
-		min_height = static_cast<int>(m_css_min_height.val());
+		min_height = static_cast<int>(props().min_height.val());
 	}
 	if (min_height != 0 && m_box_sizing == box_sizing_border_box)
 	{
@@ -2111,13 +2300,13 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 
 	if (m_display == display_list_item)
 	{
-		auto list_image = get_style_property("list-style-image", true);
+		auto list_image = get_style_property(prop_id::list_style_image, true);
 
 		if (!list_image.empty())
 		{
 			auto url = css::parse_css_url(list_image);
-			auto list_image_baseurl = get_style_property("list-style-image-baseurl", true);
-			auto sz = renderer.get_image_size(m_doc.find_image(url, list_image_baseurl));
+			auto list_image_baseurl = get_style_property(prop_id::list_style_image_baseurl, true);
+			auto sz = image_size(m_doc.find_image(url, list_image_baseurl));
 
 			if (min_height < sz.height)
 			{
@@ -2132,14 +2321,14 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 	}
 
 	// Apply max-height to block elements
-	if (!m_css_max_height.is_predefined())
+	if (!props().max_height.is_predefined())
 	{
-		int max_height = m_doc.cvt_units(m_css_max_height, m_font_size);
-		if (m_css_max_height.units() == css_units_percentage && m_parent)
+		int max_height = m_doc.cvt_units(props_mut().max_height, m_font_size);
+		if (props().max_height.units() == css_units_percentage && m_parent)
 		{
 			if (m_parent->get_predefined_height(block_height))
 			{
-				max_height = m_css_max_height.calc_percent(block_height);
+				max_height = props().max_height.calc_percent(block_height);
 			}
 		}
 		if (max_height != 0 && m_box_sizing == box_sizing_border_box)
@@ -2153,7 +2342,7 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 		}
 	}
 
-	int min_width = m_css_min_width.calc_percent(parent_width);
+	int min_width = props().min_width.calc_percent(parent_width);
 
 	if (min_width != 0 && m_box_sizing == box_sizing_border_box)
 	{
@@ -2179,7 +2368,7 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 	if (ret_width < max_width && !second_pass && m_parent)
 	{
 		if (m_display == display_inline_block ||
-			m_css_width.is_predefined() &&
+			props().width.is_predefined() &&
 			(m_float != float_none ||
 				m_display == display_table ||
 				m_el_position == element_position_absolute ||
@@ -2187,7 +2376,7 @@ int element::render(render_win32& renderer, int x, int y, int max_width, bool se
 			)
 		)
 		{
-			render(renderer, x, y, ret_width, true);
+			render(x, y, ret_width, true);
 			m_pos.width = ret_width - (content_margins_left() + content_margins_right());
 		}
 	}
@@ -2239,7 +2428,7 @@ void element::init()
 {
 	if (m_type == el_table)
 	{
-		m_grid.clear();
+		grid().clear();
 
 		go_inside_table table_selector;
 		table_rows_selector row_selector;
@@ -2250,21 +2439,21 @@ void element::init()
 		auto row = row_iter.next(false);
 		while (row)
 		{
-			m_grid.begin_row(row);
+			grid().begin_row(row);
 
 			elements_iterator<go_inside_table, table_cells_selector> cell_iter(row, table_selector, cell_selector);
 			auto cell = cell_iter.next();
 
 			while (cell)
 			{
-				m_grid.add_cell(cell);
+				grid().add_cell(cell);
 
 				cell = cell_iter.next(false);
 			}
 			row = row_iter.next(false);
 		}
 
-		m_grid.finish();
+		grid().finish();
 	}
 	else
 	{
@@ -2401,12 +2590,15 @@ int element::select(const css_element_selector& selector, const bool apply_pseud
 
 	for (const auto& sa : selector.m_attrs)
 	{
-		const auto attr_value = get_attr(sa.attribute);
+		// Pseudo cases never read an attribute; keep the map probe out of their way.
+		const auto attr_value = (sa.condition == select_pseudo_element || sa.condition == select_pseudo_class)
+			                        ? std::string_view()
+			                        : get_attr(sa.attribute);
 
 		switch (sa.condition)
 		{
 		case select_exists:
-			if (attr_value.empty())
+			if (!m_attrs.contains(sa.attribute))
 			{
 				return select_no_match;
 			}
@@ -2419,27 +2611,11 @@ int element::select(const css_element_selector& selector, const bool apply_pseud
 				}
 				if (sa.attribute == "class")
 				{
-					auto tokens1 = split_string(attr_value);
-					auto tokens2 = split_string(sa.val);
-					bool found = true;
-
-					for (auto str1 = tokens2.begin(); str1 != tokens2.end() && found; ++str1)
-					{
-						bool f = false;
-						for (auto str2 = tokens1.begin(); str2 != tokens1.end() && !f; ++str2)
-						{
-							if (is_equal(str1->c_str(), str2->c_str()))
-							{
-								f = true;
-							}
-						}
-						if (!f)
-						{
-							found = false;
-						}
-					}
-
-					if (!found)
+					// Every whitespace-delimited token of the selector must appear
+					// in the element's class list. Walked in place -- this runs for
+					// every candidate selector on every element, so the old
+					// split_string pair was the single hottest allocation in the cascade.
+					if (!contains_all_tokens(attr_value, sa.val))
 					{
 						return select_no_match;
 					}
@@ -2459,7 +2635,7 @@ int element::select(const css_element_selector& selector, const bool apply_pseud
 				{
 					return select_no_match;
 				}
-				if (!strstr(attr_value.c_str(), sa.val.c_str()))
+				if (attr_value.find(sa.val) == std::string_view::npos)
 				{
 					return select_no_match;
 				}
@@ -2471,7 +2647,8 @@ int element::select(const css_element_selector& selector, const bool apply_pseud
 				{
 					return select_no_match;
 				}
-				if (_strnicmp(attr_value.c_str(), sa.val.c_str(), sa.val.length()))
+				if (attr_value.length() < sa.val.length() ||
+					_strnicmp(attr_value.data(), sa.val.c_str(), sa.val.length()))
 				{
 					return select_no_match;
 				}
@@ -2488,7 +2665,7 @@ int element::select(const css_element_selector& selector, const bool apply_pseud
 					return select_no_match;
 				}
 				const auto offset = attr_value.length() - sa.val.length();
-				if (_strnicmp(attr_value.c_str() + offset, sa.val.c_str(), sa.val.length()) != 0)
+				if (_strnicmp(attr_value.data() + offset, sa.val.c_str(), sa.val.length()) != 0)
 				{
 					return select_no_match;
 				}
@@ -2881,7 +3058,7 @@ void element::get_line_left_right(const int y, const int def_right, int& ln_left
 	}
 }
 
-int element::fix_line_width(render_win32& renderer, const int max_width, const element_float flt)
+int element::fix_line_width(const int max_width, const element_float flt)
 {
 	int ret_width = 0;
 	if (!m_boxes.empty())
@@ -2911,7 +3088,7 @@ int element::fix_line_width(render_win32& renderer, const int max_width, const e
 
 			for (auto i = els.begin(); i != els.end(); ++i)
 			{
-				const int rw = place_element(renderer, *i, max_width);
+				const int rw = place_element(*i, max_width);
 				if (rw > ret_width)
 				{
 					ret_width = rw;
@@ -2943,7 +3120,7 @@ int element::fix_line_width(render_win32& renderer, const int max_width, const e
 					line_left += sz_font;
 				}
 
-				if (m_css_text_indent.val() != 0)
+				if (props().text_indent.val() != 0)
 				{
 					bool line_box_found = false;
 					for (auto iter = m_boxes.begin(); iter < m_boxes.end(); ++iter)
@@ -2956,7 +3133,7 @@ int element::fix_line_width(render_win32& renderer, const int max_width, const e
 					}
 					if (!line_box_found)
 					{
-						line_left += m_css_text_indent.calc_percent(max_width);
+						line_left += props().text_indent.calc_percent(max_width);
 					}
 				}
 			}
@@ -2965,7 +3142,7 @@ int element::fix_line_width(render_win32& renderer, const int max_width, const e
 			m_boxes.back()->new_width(line_left, line_right, els);
 			for (auto i = els.begin(); i != els.end(); ++i)
 			{
-				const int rw = place_element(renderer, *i, max_width);
+				const int rw = place_element(*i, max_width);
 				if (rw > ret_width)
 				{
 					ret_width = rw;
@@ -3117,10 +3294,10 @@ int element::find_next_line_top(const int top, const int width, const int def_ri
 void element::parse_background()
 {
 	// parse background-color
-	m_bg.m_color = get_color("background-color", false, web_color(0, 0, 0, 0));
+	props_mut().bg.m_color = get_color(prop_id::background_color, false, web_color(0, 0, 0, 0));
 
 	// parse background-position
-	auto str = get_style_property("background-position", false, "0% 0%");
+	auto str = get_style_property(prop_id::background_position, false, "0% 0%");
 
 	if (!str.empty())
 	{
@@ -3132,93 +3309,93 @@ void element::parse_background()
 			{
 				if (value_in_list(res[0], "left;right;center"))
 				{
-					m_bg.m_position.x.fromString(res[0], "left;right;center");
-					m_bg.m_position.y.set_value(50, css_units_percentage);
+					props_mut().bg.m_position.x.fromString(res[0], "left;right;center");
+					props_mut().bg.m_position.y.set_value(50, css_units_percentage);
 				}
 				else if (value_in_list(res[0], "top;bottom;center"))
 				{
-					m_bg.m_position.y.fromString(res[0], "top;bottom;center");
-					m_bg.m_position.x.set_value(50, css_units_percentage);
+					props_mut().bg.m_position.y.fromString(res[0], "top;bottom;center");
+					props_mut().bg.m_position.x.set_value(50, css_units_percentage);
 				}
 				else
 				{
-					m_bg.m_position.x.fromString(res[0], "left;right;center");
-					m_bg.m_position.y.set_value(50, css_units_percentage);
+					props_mut().bg.m_position.x.fromString(res[0], "left;right;center");
+					props_mut().bg.m_position.y.set_value(50, css_units_percentage);
 				}
 			}
 			else
 			{
 				if (value_in_list(res[0], "left;right"))
 				{
-					m_bg.m_position.x.fromString(res[0], "left;right;center");
-					m_bg.m_position.y.fromString(res[1], "top;bottom;center");
+					props_mut().bg.m_position.x.fromString(res[0], "left;right;center");
+					props_mut().bg.m_position.y.fromString(res[1], "top;bottom;center");
 				}
 				else if (value_in_list(res[0], "top;bottom"))
 				{
-					m_bg.m_position.x.fromString(res[1], "left;right;center");
-					m_bg.m_position.y.fromString(res[0], "top;bottom;center");
+					props_mut().bg.m_position.x.fromString(res[1], "left;right;center");
+					props_mut().bg.m_position.y.fromString(res[0], "top;bottom;center");
 				}
 				else if (value_in_list(res[1], "left;right"))
 				{
-					m_bg.m_position.x.fromString(res[1], "left;right;center");
-					m_bg.m_position.y.fromString(res[0], "top;bottom;center");
+					props_mut().bg.m_position.x.fromString(res[1], "left;right;center");
+					props_mut().bg.m_position.y.fromString(res[0], "top;bottom;center");
 				}
 				else if (value_in_list(res[1], "top;bottom"))
 				{
-					m_bg.m_position.x.fromString(res[0], "left;right;center");
-					m_bg.m_position.y.fromString(res[1], "top;bottom;center");
+					props_mut().bg.m_position.x.fromString(res[0], "left;right;center");
+					props_mut().bg.m_position.y.fromString(res[1], "top;bottom;center");
 				}
 				else
 				{
-					m_bg.m_position.x.fromString(res[0], "left;right;center");
-					m_bg.m_position.y.fromString(res[1], "top;bottom;center");
+					props_mut().bg.m_position.x.fromString(res[0], "left;right;center");
+					props_mut().bg.m_position.y.fromString(res[1], "top;bottom;center");
 				}
 			}
 
-			if (m_bg.m_position.x.is_predefined())
+			if (props().bg.m_position.x.is_predefined())
 			{
-				switch (m_bg.m_position.x.predef())
+				switch (props().bg.m_position.x.predef())
 				{
 				case 0:
-					m_bg.m_position.x.set_value(0, css_units_percentage);
+					props_mut().bg.m_position.x.set_value(0, css_units_percentage);
 					break;
 				case 1:
-					m_bg.m_position.x.set_value(100, css_units_percentage);
+					props_mut().bg.m_position.x.set_value(100, css_units_percentage);
 					break;
 				case 2:
-					m_bg.m_position.x.set_value(50, css_units_percentage);
+					props_mut().bg.m_position.x.set_value(50, css_units_percentage);
 					break;
 				}
 			}
-			if (m_bg.m_position.y.is_predefined())
+			if (props().bg.m_position.y.is_predefined())
 			{
-				switch (m_bg.m_position.y.predef())
+				switch (props().bg.m_position.y.predef())
 				{
 				case 0:
-					m_bg.m_position.y.set_value(0, css_units_percentage);
+					props_mut().bg.m_position.y.set_value(0, css_units_percentage);
 					break;
 				case 1:
-					m_bg.m_position.y.set_value(100, css_units_percentage);
+					props_mut().bg.m_position.y.set_value(100, css_units_percentage);
 					break;
 				case 2:
-					m_bg.m_position.y.set_value(50, css_units_percentage);
+					props_mut().bg.m_position.y.set_value(50, css_units_percentage);
 					break;
 				}
 			}
 		}
 		else
 		{
-			m_bg.m_position.x.set_value(0, css_units_percentage);
-			m_bg.m_position.y.set_value(0, css_units_percentage);
+			props_mut().bg.m_position.x.set_value(0, css_units_percentage);
+			props_mut().bg.m_position.y.set_value(0, css_units_percentage);
 		}
 	}
 	else
 	{
-		m_bg.m_position.y.set_value(0, css_units_percentage);
-		m_bg.m_position.x.set_value(0, css_units_percentage);
+		props_mut().bg.m_position.y.set_value(0, css_units_percentage);
+		props_mut().bg.m_position.x.set_value(0, css_units_percentage);
 	}
 
-	str = get_style_property("background-size", false, "auto");
+	str = get_style_property(prop_id::background_size, false, "auto");
 
 	if (!str.empty())
 	{
@@ -3226,59 +3403,59 @@ void element::parse_background()
 
 		if (!res.empty())
 		{
-			m_bg.m_position.width.fromString(res[0], background_size_strings);
+			props_mut().bg.m_position.width.fromString(res[0], background_size_strings);
 			if (res.size() > 1)
 			{
-				m_bg.m_position.height.fromString(res[1], background_size_strings);
+				props_mut().bg.m_position.height.fromString(res[1], background_size_strings);
 			}
 			else
 			{
-				m_bg.m_position.height.predef(background_size_auto);
+				props_mut().bg.m_position.height.predef(background_size_auto);
 			}
 		}
 		else
 		{
-			m_bg.m_position.width.predef(background_size_auto);
-			m_bg.m_position.height.predef(background_size_auto);
+			props_mut().bg.m_position.width.predef(background_size_auto);
+			props_mut().bg.m_position.height.predef(background_size_auto);
 		}
 	}
 
-	m_doc.cvt_units(m_bg.m_position.x, m_font_size);
-	m_doc.cvt_units(m_bg.m_position.y, m_font_size);
-	m_doc.cvt_units(m_bg.m_position.width, m_font_size);
-	m_doc.cvt_units(m_bg.m_position.height, m_font_size);
+	m_doc.cvt_units(props_mut().bg.m_position.x, m_font_size);
+	m_doc.cvt_units(props_mut().bg.m_position.y, m_font_size);
+	m_doc.cvt_units(props_mut().bg.m_position.width, m_font_size);
+	m_doc.cvt_units(props_mut().bg.m_position.height, m_font_size);
 
 	// parse background_attachment
-	m_bg.m_attachment = static_cast<background_attachment>(value_index(
-		get_style_property("background-attachment", false, "scroll"),
+	props_mut().bg.m_attachment = static_cast<background_attachment>(value_index(
+		get_style_property(prop_id::background_attachment, false, "scroll"),
 		background_attachment_strings,
 		background_attachment_scroll));
 
 	// parse background_attachment
-	m_bg.m_repeat = static_cast<background_repeat>(value_index(
-		get_style_property("background-repeat", false, "repeat"),
+	props_mut().bg.m_repeat = static_cast<background_repeat>(value_index(
+		get_style_property(prop_id::background_repeat, false, "repeat"),
 		background_repeat_strings,
 		background_repeat_repeat));
 
 	// parse background_clip
-	m_bg.m_clip = static_cast<background_box>(value_index(
-		get_style_property("background-clip", false, "border-box"),
+	props_mut().bg.m_clip = static_cast<background_box>(value_index(
+		get_style_property(prop_id::background_clip, false, "border-box"),
 		background_box_strings,
 		background_box_border));
 
 	// parse background_origin
-	m_bg.m_origin = static_cast<background_box>(value_index(
-		get_style_property("background-origin", false, "padding-box"),
+	props_mut().bg.m_origin = static_cast<background_box>(value_index(
+		get_style_property(prop_id::background_origin, false, "padding-box"),
 		background_box_strings,
 		background_box_content));
 
 	// parse background-image
-	m_bg.m_image = css::parse_css_url(get_style_property("background-image", false));
-	m_bg.m_baseurl = get_style_property("background-image-baseurl", false);
+	props_mut().bg.m_image = css::parse_css_url(get_style_property(prop_id::background_image, false));
+	props_mut().bg.m_baseurl = get_style_property(prop_id::background_image_baseurl, false);
 
-	if (!m_bg.m_image.empty())
+	if (!props().bg.m_image.empty())
 	{
-		m_doc.load_image(m_bg.m_image, m_bg.m_baseurl.empty() ? "" : m_bg.m_baseurl);
+		m_doc.load_image(props().bg.m_image, props().bg.m_baseurl.empty() ? "" : props().bg.m_baseurl);
 	}
 }
 
@@ -3296,24 +3473,24 @@ void element::add_positioned(element* el)
 
 void element::calc_outlines(const int parent_width)
 {
-	m_padding.left = m_css_padding.left.calc_percent(parent_width);
-	m_padding.right = m_css_padding.right.calc_percent(parent_width);
+	m_padding.left = props().padding.left.calc_percent(parent_width);
+	m_padding.right = props().padding.right.calc_percent(parent_width);
 
-	m_borders.left = m_css_borders.left.width.calc_percent(parent_width);
-	m_borders.right = m_css_borders.right.width.calc_percent(parent_width);
+	m_borders.left = props().borders.left.width.calc_percent(parent_width);
+	m_borders.right = props().borders.right.width.calc_percent(parent_width);
 
-	m_margins.left = m_css_margins.left.calc_percent(parent_width);
-	m_margins.right = m_css_margins.right.calc_percent(parent_width);
+	m_margins.left = props().margins.left.calc_percent(parent_width);
+	m_margins.right = props().margins.right.calc_percent(parent_width);
 
-	m_margins.top = m_css_margins.top.calc_percent(parent_width);
-	m_margins.bottom = m_css_margins.bottom.calc_percent(parent_width);
+	m_margins.top = props().margins.top.calc_percent(parent_width);
+	m_margins.bottom = props().margins.bottom.calc_percent(parent_width);
 
-	m_padding.top = m_css_padding.top.calc_percent(parent_width);
-	m_padding.bottom = m_css_padding.bottom.calc_percent(parent_width);
+	m_padding.top = props().padding.top.calc_percent(parent_width);
+	m_padding.bottom = props().padding.bottom.calc_percent(parent_width);
 
 	if (m_display == display_block || m_display == display_table)
 	{
-		if (m_css_margins.left.is_predefined() && m_css_margins.right.is_predefined())
+		if (props().margins.left.is_predefined() && props().margins.right.is_predefined())
 		{
 			const int el_width = m_pos.width + m_borders.left + m_borders.right + m_padding.left + m_padding.right;
 			if (el_width <= parent_width)
@@ -3327,14 +3504,14 @@ void element::calc_outlines(const int parent_width)
 				m_margins.right = 0;
 			}
 		}
-		else if (m_css_margins.left.is_predefined() && !m_css_margins.right.is_predefined())
+		else if (props().margins.left.is_predefined() && !props().margins.right.is_predefined())
 		{
 			const int el_width = m_pos.width + m_borders.left + m_borders.right + m_padding.left + m_padding.right +
 				m_margins.right;
 			m_margins.left = parent_width - el_width;
 			if (m_margins.left < 0) m_margins.left = 0;
 		}
-		else if (!m_css_margins.left.is_predefined() && m_css_margins.right.is_predefined())
+		else if (!props().margins.left.is_predefined() && props().margins.right.is_predefined())
 		{
 			const int el_width = m_pos.width + m_borders.left + m_borders.right + m_padding.left + m_padding.right +
 				m_margins.left;
@@ -3348,7 +3525,7 @@ void element::parse_attributes()
 {
 	if (m_type == el_tr)
 	{
-		auto str = get_attr("align");
+		std::string str(get_attr("align"));
 
 		if (!str.empty())
 		{
@@ -3368,7 +3545,7 @@ void element::parse_attributes()
 	}
 	else if (m_type == el_td)
 	{
-		auto str = get_attr("width");
+		std::string str(get_attr("width"));
 
 		if (!str.empty())
 		{
@@ -3401,7 +3578,7 @@ void element::parse_attributes()
 	}
 	else if (m_type == el_table)
 	{
-		auto str = get_attr("width");
+		std::string str(get_attr("width"));
 
 		if (!str.empty())
 		{
@@ -3449,12 +3626,12 @@ void element::parse_attributes()
 		if (!m_loaded)
 		{
 			m_loaded = true;
-			m_doc.add_stylesheet(m_text, "", get_attr("media", ""));
+			m_doc.add_stylesheet(m_text, "", std::string(get_attr("media", "")));
 		}
 	}
 	else if (m_type == el_para)
 	{
-		const auto& str = get_attr("align");
+		const std::string str(get_attr("align"));
 
 		if (!str.empty())
 		{
@@ -3467,12 +3644,12 @@ void element::parse_attributes()
 		{
 			m_loaded = true;
 
-			const auto& rel = get_attr("rel");
+			const auto rel = get_attr("rel");
 
 			if (!rel.empty() && rel == "stylesheet")
 			{
-				const auto& media = get_attr("media");
-				const auto& href = get_attr("href");
+				const std::string media(get_attr("media"));
+				const std::string href(get_attr("href"));
 
 				if (!href.empty())
 				{
@@ -3489,14 +3666,14 @@ void element::parse_attributes()
 	{
 		m_src = get_attr("src");
 
-		const auto& attr_height = get_attr("height");
+		const std::string attr_height(get_attr("height"));
 
 		if (!attr_height.empty())
 		{
 			m_style.add_property("height", attr_height, empty, false);
 		}
 
-		const auto& attr_width = get_attr("width");
+		const std::string attr_width(get_attr("width"));
 
 		if (!attr_width.empty())
 		{
@@ -3505,7 +3682,7 @@ void element::parse_attributes()
 	}
 	else if (m_type == el_svg)
 	{
-		auto str = get_attr("width");
+		std::string str(get_attr("width"));
 		if (!str.empty())
 		{
 			m_style.add_property("width", str, empty, false);
@@ -3527,7 +3704,7 @@ void element::parse_attributes()
 	}
 	else if (m_type == el_font)
 	{
-		auto str = get_attr("color");
+		std::string str(get_attr("color"));
 
 		if (!str.empty())
 		{
@@ -3576,7 +3753,7 @@ void element::parse_attributes()
 	}
 	else if (m_type == el_div)
 	{
-		const auto& str = get_attr("align");
+		const std::string str(get_attr("align"));
 
 		if (!str.empty())
 		{
@@ -3585,7 +3762,7 @@ void element::parse_attributes()
 	}
 	else if (m_type == el_break)
 	{
-		const auto& attr_clear = get_attr("clear");
+		const std::string attr_clear(get_attr("clear"));
 
 		if (!attr_clear.empty())
 		{
@@ -3594,7 +3771,7 @@ void element::parse_attributes()
 	}
 	else if (m_type == el_base)
 	{
-		m_doc.set_base_url(get_attr("href"));
+		m_doc.set_base_url(std::string(get_attr("href")));
 		return; //?
 	}
 
@@ -3621,9 +3798,12 @@ const std::string element::get_text() const
 	return result;
 }
 
-void element::set_data(const std::string& data)
+void element::set_data(const std::string_view data)
 {
-	if (m_type == el_cdata || m_type == el_comment)
+	// Raw-text elements (<style>, <script>, <svg>) deliver their content as a
+	// single data token rather than as words, so they must accumulate it too.
+	if (m_type == el_cdata || m_type == el_comment ||
+		m_type == el_style || m_type == el_script || m_type == el_svg)
 	{
 		m_text += data;
 	}
@@ -3860,7 +4040,7 @@ void element::on_click()
 {
 	if (m_type == el_anchor)
 	{
-		const auto& href = get_attr("href");
+		const std::string href(get_attr("href"));
 
 		if (!href.empty())
 		{
@@ -3875,7 +4055,7 @@ void element::on_click()
 
 const std::string element::get_cursor() const
 {
-	return get_style_property("cursor", true);
+	return get_style_property(prop_id::cursor, true);
 }
 
 static const int font_size_table[8][7] =
@@ -3894,7 +4074,7 @@ static const int font_size_table[8][7] =
 void element::init_font()
 {
 	// initialize font size
-	const auto str = get_style_property("font-size", false);
+	const auto str = get_style_property(prop_id::font_size, false);
 
 	int parent_sz = 0;
 	const int doc_font_size = m_doc.get_default_font_size();
@@ -3978,10 +4158,10 @@ void element::init_font()
 	}
 
 	// initialize font
-	const auto name = get_style_property("font-family", true, "inherit");
-	const auto weight = get_style_property("font-weight", true, "normal");
-	const auto style = get_style_property("font-style", true, "normal");
-	const auto decoration = get_style_property("text-decoration", true, "none");
+	const auto name = get_style_property(prop_id::font_family, true, "inherit");
+	const auto weight = get_style_property(prop_id::font_weight, true, "normal");
+	const auto style = get_style_property(prop_id::font_style, true, "normal");
+	const auto decoration = get_style_property(prop_id::text_decoration, true, "none");
 
 
 	m_font = m_doc.get_font(name, m_font_size, weight, style, decoration, &m_font_metrics);
@@ -4009,7 +4189,7 @@ bool element::is_break() const
 	return m_type == el_break;
 }
 
-void element::set_tag_name(const std::string& name)
+void element::set_tag_name(const std::string_view name)
 {
 	m_tag = name;
 }
@@ -4028,23 +4208,23 @@ void element::draw_background(render_win32& renderer, int x, int y, const positi
 	{
 		if (el_pos.does_intersect(clip))
 		{
-			background* bg = get_background();
+			const background* bg = get_background();
 			if (bg)
 			{
 				background_paint bg_paint;
-				init_background_paint(renderer, pos, bg_paint, bg);
+				init_background_paint(pos, bg_paint, bg);
 
 				renderer.draw_background(renderer, bg_paint);
 			}
 			position border_box = pos;
 			border_box += m_padding;
 			border_box += m_borders;
-			renderer.draw_borders(m_css_borders, border_box, parent() ? false : true);
+			renderer.draw_borders(props().borders, border_box, parent() ? false : true);
 		}
 	}
 	else
 	{
-		background* bg = get_background();
+		const background* bg = get_background();
 
 		position::vector boxes;
 		get_inline_boxes(boxes);
@@ -4065,7 +4245,7 @@ void element::draw_background(render_win32& renderer, int x, int y, const positi
 
 				if (bg)
 				{
-					init_background_paint(renderer, content_box, bg_paint, bg);
+					init_background_paint(content_box, bg_paint, bg);
 				}
 
 				css_borders bdr;
@@ -4073,31 +4253,31 @@ void element::draw_background(render_win32& renderer, int x, int y, const positi
 				// set left borders radius for the first box
 				if (box == boxes.begin())
 				{
-					bdr.radius.bottom_left_x = m_css_borders.radius.bottom_left_x;
-					bdr.radius.bottom_left_y = m_css_borders.radius.bottom_left_y;
-					bdr.radius.top_left_x = m_css_borders.radius.top_left_x;
-					bdr.radius.top_left_y = m_css_borders.radius.top_left_y;
+					bdr.radius.bottom_left_x = props().borders.radius.bottom_left_x;
+					bdr.radius.bottom_left_y = props().borders.radius.bottom_left_y;
+					bdr.radius.top_left_x = props().borders.radius.top_left_x;
+					bdr.radius.top_left_y = props().borders.radius.top_left_y;
 				}
 
 				// set right borders radius for the last box
 				if (box == boxes.end() - 1)
 				{
-					bdr.radius.bottom_right_x = m_css_borders.radius.bottom_right_x;
-					bdr.radius.bottom_right_y = m_css_borders.radius.bottom_right_y;
-					bdr.radius.top_right_x = m_css_borders.radius.top_right_x;
-					bdr.radius.top_right_y = m_css_borders.radius.top_right_y;
+					bdr.radius.bottom_right_x = props().borders.radius.bottom_right_x;
+					bdr.radius.bottom_right_y = props().borders.radius.bottom_right_y;
+					bdr.radius.top_right_x = props().borders.radius.top_right_x;
+					bdr.radius.top_right_y = props().borders.radius.top_right_y;
 				}
 
 
-				bdr.top = m_css_borders.top;
-				bdr.bottom = m_css_borders.bottom;
+				bdr.top = props().borders.top;
+				bdr.bottom = props().borders.bottom;
 				if (box == boxes.begin())
 				{
-					bdr.left = m_css_borders.left;
+					bdr.left = props().borders.left;
 				}
 				if (box == boxes.end() - 1)
 				{
-					bdr.right = m_css_borders.right;
+					bdr.right = props().borders.right;
 				}
 
 
@@ -4113,7 +4293,7 @@ void element::draw_background(render_win32& renderer, int x, int y, const positi
 	}
 }
 
-int element::render_inline(render_win32& renderer, element* container, const int max_width)
+int element::render_inline(element* container, const int max_width)
 {
 	if (m_type == el_text || m_type == el_space)
 	{
@@ -4124,7 +4304,7 @@ int element::render_inline(render_win32& renderer, element* container, const int
 	int rw = 0;
 	for (const auto& child : m_children)
 	{
-		rw = container->place_element(renderer, child.get(), max_width);
+		rw = container->place_element(child.get(), max_width);
 
 		if (rw > ret_width)
 		{
@@ -4134,13 +4314,13 @@ int element::render_inline(render_win32& renderer, element* container, const int
 	return ret_width;
 }
 
-int element::place_element(render_win32& renderer, element* el, const int max_width)
+int element::place_element(element* el, const int max_width)
 {
 	if (el->get_display() == display_none) return 0;
 
 	if (el->get_display() == display_inline)
 	{
-		return el->render_inline(renderer, this, max_width);
+		return el->render_inline(this, max_width);
 	}
 
 	const auto el_position = el->get_element_position();
@@ -4164,7 +4344,7 @@ int element::place_element(render_win32& renderer, element* el, const int max_wi
 			}
 		}
 
-		el->render(renderer, 0, line_top, max_width);
+		el->render(0, line_top, max_width);
 		el->m_pos.x += el->content_margins_left();
 		el->m_pos.y += el->content_margins_top();
 
@@ -4194,7 +4374,7 @@ int element::place_element(render_win32& renderer, element* el, const int max_wi
 			int line_right = max_width;
 			get_line_left_right(line_top, max_width, line_left, line_right);
 
-			el->render(renderer, line_left, line_top, line_right);
+			el->render(line_left, line_top, line_right);
 			if (el->right() > line_right)
 			{
 				const int new_top = find_next_line_top(el->top(), el->width(), max_width);
@@ -4202,7 +4382,7 @@ int element::place_element(render_win32& renderer, element* el, const int max_wi
 				el->m_pos.y = new_top + el->content_margins_top();
 			}
 			add_float(el, 0, 0);
-			ret_width = fix_line_width(renderer, max_width, float_left);
+			ret_width = fix_line_width(max_width, float_left);
 			if (!ret_width)
 			{
 				ret_width = el->right();
@@ -4228,7 +4408,7 @@ int element::place_element(render_win32& renderer, element* el, const int max_wi
 			int line_right = max_width;
 			get_line_left_right(line_top, max_width, line_left, line_right);
 
-			el->render(renderer, 0, line_top, line_right);
+			el->render(0, line_top, line_right);
 
 			if (line_left + el->width() > line_right)
 			{
@@ -4241,7 +4421,7 @@ int element::place_element(render_win32& renderer, element* el, const int max_wi
 				el->m_pos.x = line_right - el->width() + el->content_margins_left();
 			}
 			add_float(el, 0, 0);
-			ret_width = fix_line_width(renderer, max_width, float_right);
+			ret_width = fix_line_width(max_width, float_right);
 
 			if (!ret_width)
 			{
@@ -4268,7 +4448,7 @@ int element::place_element(render_win32& renderer, element* el, const int max_wi
 			{
 			case display_inline_block:
 			case display_inline_flex:
-				ret_width = el->render(renderer, line_left, line_top, line_right);
+				ret_width = el->render(line_left, line_top, line_right);
 				break;
 			case display_block:
 			case display_flex:
@@ -4285,7 +4465,7 @@ int element::place_element(render_win32& renderer, element* el, const int max_wi
 			case display_inline_text:
 				{
 					size sz;
-					el->get_content_size(renderer, sz, line_right);
+					el->get_content_size(sz, line_right);
 					el->m_pos = sz;
 				}
 				break;
@@ -4354,7 +4534,7 @@ int element::place_element(render_win32& renderer, element* el, const int max_wi
 			{
 			case display_table:
 			case display_list_item:
-				ret_width = el->render(renderer, line_left, line_top, line_right - line_left);
+				ret_width = el->render(line_left, line_top, line_right - line_left);
 				break;
 			case display_block:
 			case display_flex:
@@ -4363,16 +4543,16 @@ int element::place_element(render_win32& renderer, element* el, const int max_wi
 			case display_table_row:
 				if (el->is_replaced() || el->is_floats_holder())
 				{
-					ret_width = el->render(renderer, line_left, line_top, line_right - line_left) + line_left + (
+					ret_width = el->render(line_left, line_top, line_right - line_left) + line_left + (
 						max_width - line_right);
 				}
 				else
 				{
-					ret_width = el->render(renderer, 0, line_top, max_width);
+					ret_width = el->render(0, line_top, max_width);
 				}
 				break;
 			case display_inline_flex:
-				ret_width = el->render(renderer, line_left, line_top, line_right - line_left);
+				ret_width = el->render(line_left, line_top, line_right - line_left);
 				break;
 			default:
 				ret_width = 0;
@@ -4486,7 +4666,7 @@ int element::new_box(const element* el, const int max_width)
 	if (el->is_inline_box())
 	{
 		int text_indent = 0;
-		if (m_css_text_indent.val() != 0)
+		if (props().text_indent.val() != 0)
 		{
 			bool line_box_found = false;
 			for (auto iter = m_boxes.begin(); iter != m_boxes.end(); ++iter)
@@ -4499,7 +4679,7 @@ int element::new_box(const element* el, const int max_width)
 			}
 			if (!line_box_found)
 			{
-				text_indent = m_css_text_indent.calc_percent(max_width);
+				text_indent = props().text_indent.calc_percent(max_width);
 			}
 		}
 
@@ -4591,6 +4771,8 @@ bool element::is_floats_holder() const
 		m_display == display_flex ||
 		m_display == display_inline_flex ||
 		m_display == display_table_cell ||
+		(m_parent && (m_parent->get_display() == display_flex ||
+			m_parent->get_display() == display_inline_flex)) ||
 		!m_parent ||
 		is_body() ||
 		m_float != float_none ||
@@ -4674,7 +4856,7 @@ css_length element::get_css_left() const
 		return css_length();
 	}
 
-	return m_css_offsets.left;
+	return props().offsets.left;
 }
 
 css_length element::get_css_right() const
@@ -4684,7 +4866,7 @@ css_length element::get_css_right() const
 		return css_length();
 	}
 
-	return m_css_offsets.right;
+	return props().offsets.right;
 }
 
 css_length element::get_css_top() const
@@ -4694,7 +4876,7 @@ css_length element::get_css_top() const
 		return css_length();
 	}
 
-	return m_css_offsets.top;
+	return props().offsets.top;
 }
 
 css_length element::get_css_bottom() const
@@ -4704,7 +4886,7 @@ css_length element::get_css_bottom() const
 		return css_length();
 	}
 
-	return m_css_offsets.bottom;
+	return props().offsets.bottom;
 }
 
 
@@ -4724,7 +4906,7 @@ css_offsets element::get_css_offsets() const
 		}
 	}
 
-	return m_css_offsets;
+	return props().offsets;
 }
 
 element_clear element::get_clear() const
@@ -4744,7 +4926,7 @@ css_length element::get_css_width() const
 		return css_length();
 	}
 
-	return m_css_width;
+	return props().width;
 }
 
 css_length element::get_css_height() const
@@ -4754,7 +4936,7 @@ css_length element::get_css_height() const
 		return css_length();
 	}
 
-	return m_css_height;
+	return props().height;
 }
 
 size_t element::get_children_count() const
@@ -4769,7 +4951,7 @@ element* element::get_child(const int idx) const
 
 void element::set_css_width(const css_length& w)
 {
-	m_css_width = w;
+	props_mut().width = w;
 }
 
 void element::apply_vertical_align()
@@ -4827,12 +5009,12 @@ element_position element::get_element_position(css_offsets* offsets) const
 
 	if (offsets && m_el_position != element_position_static)
 	{
-		*offsets = m_css_offsets;
+		*offsets = props().offsets;
 	}
 	return m_el_position;
 }
 
-void element::init_background_paint(render_win32& renderer, const position pos, background_paint& bg_paint,
+void element::init_background_paint(const position pos, background_paint& bg_paint,
                                     const background* bg)
 {
 	if (!bg) return;
@@ -4877,7 +5059,7 @@ void element::init_background_paint(render_win32& renderer, const position pos, 
 
 	if (bg_paint.image)
 	{
-		bg_paint.image_size = renderer.get_image_size(bg_paint.image);
+		bg_paint.image_size = image_size(bg_paint.image);
 
 		if (bg_paint.image_size.width && bg_paint.image_size.height)
 		{
@@ -4951,7 +5133,7 @@ void element::init_background_paint(render_win32& renderer, const position pos, 
 				bg_paint.origin_box.height - bg_paint.image_size.height);
 		}
 	}
-	bg_paint.border_radius = m_css_borders.radius;
+	bg_paint.border_radius = props().borders.radius;
 	bg_paint.border_box = border_box;
 	bg_paint.is_root = parent() ? false : true;
 }
@@ -4965,14 +5147,14 @@ void element::draw_list_marker(render_win32& renderer, const position& pos)
 {
 	list_marker lm;
 
-	const auto list_image = get_style_property("list-style-image", true);
+	const auto list_image = get_style_property(prop_id::list_style_image, true);
 	size img_size;
 
 	if (!list_image.empty())
 	{
 		lm.image = css::parse_css_url(list_image);
-		lm.baseurl = get_style_property("list-style-image-baseurl", true);
-		img_size = renderer.get_image_size(m_doc.find_image(lm.image, lm.baseurl));
+		lm.baseurl = get_style_property(prop_id::list_style_image_baseurl, true);
+		img_size = image_size(m_doc.find_image(lm.image, lm.baseurl));
 	}
 
 	const int ln_height = line_height();
@@ -5001,7 +5183,7 @@ void element::draw_list_marker(render_win32& renderer, const position& pos)
 		lm.pos.x -= sz_font;
 	}
 
-	lm.color = get_color("color", true, web_color(0, 0, 0));
+	lm.color = get_color(prop_id::color, true, web_color(0, 0, 0));
 	lm.marker_type = m_list_style_type;
 	renderer.draw_list_marker(lm);
 }
@@ -5015,15 +5197,15 @@ void element::draw_children(render_win32& renderer, const int x, const int y, co
 
 	if (m_type == el_table)
 	{
-		for (int row = 0; row < m_grid.rows_count(); row++)
+		for (int row = 0; row < grid().rows_count(); row++)
 		{
 			if (flag == draw_block)
 			{
-				m_grid.row(row).el_row->draw_background(renderer, pos.x, pos.y, clip);
+				grid().row(row).el_row->draw_background(renderer, pos.x, pos.y, clip);
 			}
-			for (int col = 0; col < m_grid.cols_count(); col++)
+			for (int col = 0; col < grid().cols_count(); col++)
 			{
-				const table_cell* cell = m_grid.cell(col, row);
+				const table_cell* cell = grid().cell(col, row);
 				if (cell->el)
 				{
 					if (flag == draw_block)
@@ -5155,7 +5337,7 @@ int element::get_zindex() const
 	return m_z_index;
 }
 
-void element::render_positioned(render_win32& renderer, const render_type rt)
+void element::render_positioned(const render_type rt)
 {
 	if (m_type == el_text || m_type == el_space)
 	{
@@ -5350,7 +5532,7 @@ void element::render_positioned(render_win32& renderer, const render_type rt)
 			if (need_render)
 			{
 				const position pos = el->m_pos;
-				el->render(renderer, el->left(), el->top(), el->width(), true);
+				el->render(el->left(), el->top(), el->width(), true);
 				el->m_pos = pos;
 			}
 
@@ -5362,7 +5544,7 @@ void element::render_positioned(render_win32& renderer, const render_type rt)
 			}
 		}
 
-		el->render_positioned(renderer);
+		el->render_positioned();
 	}
 
 	if (!m_positioned.empty())
@@ -5731,7 +5913,7 @@ element* element::get_element_before()
 	}
 
 	auto el = std::make_unique<element>(m_doc, el_before);
-	auto raw = el.get();
+	const auto raw = el.get();
 	raw->parent(this);
 	m_children.insert(m_children.begin(), std::move(el));
 	return raw;
@@ -5747,7 +5929,7 @@ element* element::get_element_after()
 		}
 	}
 	auto el = std::make_unique<element>(m_doc, el_after);
-	auto raw = el.get();
+	const auto raw = el.get();
 	raw->parent(this);
 	m_children.push_back(std::move(el));
 	return raw;
@@ -5764,7 +5946,7 @@ void element::add_style(const std::shared_ptr<style>& st)
 
 	if (m_type == el_before || m_type == el_after)
 	{
-		const auto content = get_style_property("content", false);
+		const auto content = get_style_property(prop_id::content, false);
 
 		if (!content.empty())
 		{
@@ -6080,19 +6262,19 @@ element* element::get_element_by_point(const int x, const int y, const int clien
 	return ret;
 }
 
-background* element::get_background(const bool own_only)
+const background* element::get_background(const bool own_only)
 {
 	if (own_only)
 	{
 		// return own background with check for empty one
-		if (m_bg.m_image.empty() && !m_bg.m_color.alpha)
+		if (props().bg.m_image.empty() && !props().bg.m_color.alpha)
 		{
 			return nullptr;
 		}
-		return &m_bg;
+		return &props().bg;
 	}
 
-	if (m_bg.m_image.empty() && !m_bg.m_color.alpha)
+	if (props().bg.m_image.empty() && !props().bg.m_color.alpha)
 	{
 		// if this is root element (<html>) try to get background from body
 		if (!parent())
@@ -6118,7 +6300,7 @@ background* element::get_background(const bool own_only)
 		}
 	}
 
-	return &m_bg;
+	return &props().bg;
 }
 
 
@@ -6184,7 +6366,7 @@ void element::add_function(const std::string& fnc, const std::string& params)
 	// attr
 	case 0:
 		{
-			const auto& attr_value = m_parent->get_attr(trim_lower(params));
+			const std::string attr_value(m_parent->get_attr(trim_lower(params)));
 
 			if (!attr_value.empty())
 			{
@@ -6220,9 +6402,12 @@ void element::add_function(const std::string& fnc, const std::string& params)
 				el->set_attr("src", p_url);
 				el->set_attr("style", "display:inline-block");
 				el->set_tag_name("img");
-				auto raw = el.get();
-				append_child(std::move(el));
-				raw->parse_attributes();
+				const auto raw = el.get();
+
+				if (!append_child(std::move(el)))
+				{
+					raw->parse_attributes();
+				}
 			}
 		}
 		break;
@@ -6240,11 +6425,11 @@ std::string element::resolve_custom_property(const std::string& name) const
 
 	while (el)
 	{
-		const auto val = el->m_style.get_property(name);
+		const auto val = el->m_style.get_custom_property(name);
 
 		if (!val.empty())
 		{
-			return val;
+			return std::string(val);
 		}
 
 		el = el->m_parent;
@@ -6621,7 +6806,8 @@ int box::top_margin() const
 {
 	if (m_type == box_block)
 	{
-		if (m_element && m_element->collapse_top_margin())
+		if (m_element && m_element->in_normal_flow() && m_element->get_float() == float_none &&
+			m_element->m_margins.top >= 0 && m_element->parent())
 		{
 			return m_element->m_margins.top;
 		}
@@ -6634,7 +6820,8 @@ int box::bottom_margin() const
 {
 	if (m_type == box_block)
 	{
-		if (m_element && m_element->collapse_bottom_margin())
+		if (m_element && m_element->in_normal_flow() && m_element->get_float() == float_none &&
+			m_element->m_margins.bottom >= 0 && m_element->parent())
 		{
 			return m_element->m_margins.bottom;
 		}
@@ -6751,8 +6938,8 @@ void table_grid::add_cell(element* el)
 {
 	table_cell cell;
 	cell.el = el;
-	cell.colspan = safe_stoi(el->get_attr("colspan", "1"), 1);
-	cell.rowspan = safe_stoi(el->get_attr("rowspan", "1"), 1);
+	cell.colspan = safe_stoi(std::string(el->get_attr("colspan", "1")), 1);
+	cell.rowspan = safe_stoi(std::string(el->get_attr("rowspan", "1")), 1);
 	cell.borders = el->get_borders();
 
 	while (is_rowspanned(static_cast<int>(m_cells.size()) - 1, static_cast<int>(m_cells.back().size())))
@@ -6846,7 +7033,7 @@ void table_grid::finish()
 	{
 		for (int row = 0; row < m_rows_count; row++)
 		{
-			if (cell(col, row)->el)
+			if (cell(col, row)->el && cell(col, row)->colspan <= 1)
 			{
 				cell(col, row)->el->set_css_width(m_columns[col].css_width);
 			}
@@ -6952,7 +7139,7 @@ void table_grid::distribute_width(int width, const int start, const int end)
 					}
 					else
 					{
-						int sign = add > 0 ? 1 : (add < 0 ? -1 : 0);
+						const int sign = add > 0 ? 1 : (add < 0 ? -1 : 0);
 						added_width += ((*col)->width - (*col)->min_width) * sign;
 						(*col)->width = (*col)->min_width;
 					}

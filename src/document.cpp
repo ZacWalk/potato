@@ -7,11 +7,120 @@
 // ui.h removed: document.cpp now uses view_host + dispatch_to_ui/async from core.h
 #include "resource.h"
 
+namespace
+{
+	std::string svg_attribute(const std::string& tag, const std::string& name)
+	{
+		size_t pos = 0;
+		while ((pos = tag.find(name, pos)) != std::string::npos)
+		{
+			const bool valid_start = pos == 0 || isspace(static_cast<unsigned char>(tag[pos - 1]));
+			size_t equals = pos + name.size();
+			while (equals < tag.size() && isspace(static_cast<unsigned char>(tag[equals]))) ++equals;
+			if (!valid_start || equals >= tag.size() || tag[equals] != '=')
+			{
+				pos += name.size();
+				continue;
+			}
+
+			++equals;
+			while (equals < tag.size() && isspace(static_cast<unsigned char>(tag[equals]))) ++equals;
+			if (equals >= tag.size()) return {};
+
+			const char quote = tag[equals];
+			if (quote == '\'' || quote == '"')
+			{
+				const auto end = tag.find(quote, equals + 1);
+				return end == std::string::npos ? std::string{} : tag.substr(equals + 1, end - equals - 1);
+			}
+
+			const auto end = tag.find_first_of(" \t\r\n>", equals);
+			return tag.substr(equals, end - equals);
+		}
+		return {};
+	}
+
+	double svg_number(const std::string& value)
+	{
+		if (value.empty() || value.find('%') != std::string::npos) return 0;
+		char* end = nullptr;
+		const double result = std::strtod(value.c_str(), &end);
+		return end != value.c_str() && result > 0 ? result : 0;
+	}
+
+	pf::bitmap_ptr create_svg_placeholder(const std::string& text)
+	{
+		std::string lower = text.substr(0, std::min<size_t>(text.size(), 8192));
+		transform_text(lower, text_transform_lowercase);
+		const auto svg_start = lower.find("<svg");
+		if (svg_start == std::string::npos) return nullptr;
+		const auto svg_end = lower.find('>', svg_start + 4);
+		if (svg_end == std::string::npos) return nullptr;
+
+		const auto tag = lower.substr(svg_start, svg_end - svg_start + 1);
+		double width = svg_number(svg_attribute(tag, "width"));
+		double height = svg_number(svg_attribute(tag, "height"));
+
+		double view_width = 0;
+		double view_height = 0;
+		const auto view_box = svg_attribute(tag, "viewbox");
+		if (!view_box.empty())
+		{
+			const char* cursor = view_box.c_str();
+			for (int part = 0; part < 4; ++part)
+			{
+				while (*cursor && (isspace(static_cast<unsigned char>(*cursor)) || *cursor == ',')) ++cursor;
+				char* end = nullptr;
+				const double value = std::strtod(cursor, &end);
+				if (end == cursor) break;
+				if (part == 2) view_width = value;
+				if (part == 3) view_height = value;
+				cursor = end;
+			}
+		}
+
+		if (width <= 0) width = view_width;
+		if (height <= 0) height = view_height;
+		if (width <= 0 && height > 0 && view_width > 0 && view_height > 0)
+			width = height * view_width / view_height;
+		if (height <= 0 && width > 0 && view_width > 0 && view_height > 0)
+			height = width * view_height / view_width;
+		if (width <= 0) width = 300;
+		if (height <= 0) height = 150;
+
+		const int bitmap_width = std::clamp(static_cast<int>(width + 0.5), 1, 2048);
+		const int bitmap_height = std::clamp(static_cast<int>(height + 0.5), 1, 2048);
+		std::vector<uint32_t> pixels(static_cast<size_t>(bitmap_width) * bitmap_height, 0xffeeeeee);
+		const auto set_pixel = [&](const int x, const int y, const uint32_t color)
+		{
+			pixels[static_cast<size_t>(y) * bitmap_width + x] = color;
+		};
+
+		for (int x = 0; x < bitmap_width; ++x)
+		{
+			set_pixel(x, 0, 0xff999999);
+			set_pixel(x, bitmap_height - 1, 0xff999999);
+		}
+		for (int y = 0; y < bitmap_height; ++y)
+		{
+			set_pixel(0, y, 0xff999999);
+			set_pixel(bitmap_width - 1, y, 0xff999999);
+			const int diagonal = bitmap_height > 1
+				                     ? y * (bitmap_width - 1) / (bitmap_height - 1)
+				                     : 0;
+			set_pixel(diagonal, y, 0xffbbbbbb);
+			set_pixel(bitmap_width - 1 - diagonal, y, 0xffbbbbbb);
+		}
+
+		return std::make_shared<pf::bitmap>(bitmap_width, bitmap_height, std::move(pixels));
+	}
+}
+
 
 // Async HTTP — wraps pf::async_http_session to download to a temp file and
 // then deliver a single completion callback (file_path, error, status, url).
 
-bool http::open(std::string_view user_agent)
+bool http::open(const std::string_view user_agent)
 {
 	m_session = pf::create_async_http_session(user_agent);
 	return static_cast<bool>(m_session);
@@ -71,11 +180,11 @@ bool http::download_file(const std::string& url_in, const std::shared_ptr<http_r
 	ctx->parent = this;
 
 	pf::async_http_callbacks cb;
-	cb.on_headers = [ctx](int status, std::string, uint64_t)
+	cb.on_headers = [ctx](const int status, std::string, uint64_t)
 	{
 		ctx->status_code = status;
 	};
-	cb.on_data = [ctx](const uint8_t* data, size_t size)
+	cb.on_data = [ctx](const uint8_t* data, const size_t size)
 	{
 		if (ctx->file) ctx->file->write(data, static_cast<uint32_t>(size));
 	};
@@ -116,379 +225,6 @@ bool http::download_file(const std::string& url_in, const std::shared_ptr<http_r
 	request->set_async(std::move(async));
 	return true;
 }
-
-
-// ── Removed legacy WinHTTP-direct http/http_request implementation ───────────
-// The previous ~370 line block below has been replaced by the pf::async_http_session
-// wrapper above. Kept the comment marker for git history clarity.
-#if 0
-http::~http()
-{
-	stop();
-	close();
-}
-
-bool http::open(const LPCWSTR pwszUserAgent, const DWORD dwAccessType, const LPCWSTR pwszProxyName,
-                const LPCWSTR pwszProxyBypass)
-{
-	m_hSession = WinHttpOpen(pwszUserAgent, dwAccessType, pwszProxyName, pwszProxyBypass, WINHTTP_FLAG_ASYNC);
-	if (!m_hSession) return false;
-
-	WinHttpSetOption(m_hSession, WINHTTP_OPTION_MAX_CONNS_PER_SERVER,
-	                 &m_max_connections_per_server, sizeof(m_max_connections_per_server));
-
-	// Enable automatic gzip/deflate decoding so we can talk to modern sites (e.g. Wikipedia).
-	DWORD decompress = WINHTTP_DECOMPRESSION_FLAG_ALL;
-	WinHttpSetOption(m_hSession, WINHTTP_OPTION_DECOMPRESSION, &decompress, sizeof(decompress));
-
-	// Allow redirects across http<->https; default policy disallows scheme downgrade only.
-	DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
-	WinHttpSetOption(m_hSession, WINHTTP_OPTION_REDIRECT_POLICY, &redirect, sizeof(redirect));
-
-	// Modern TLS only.
-	DWORD secure_protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
-	WinHttpSetOption(m_hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &secure_protocols, sizeof(secure_protocols));
-
-	if (WinHttpSetStatusCallback(m_hSession, http_callback,
-	                             WINHTTP_CALLBACK_FLAG_ALL_NOTIFICATIONS, 0) == WINHTTP_INVALID_STATUS_CALLBACK)
-	{
-		WinHttpCloseHandle(m_hSession);
-		m_hSession = nullptr;
-		return false;
-	}
-
-	return true;
-}
-
-void http::close()
-{
-	if (m_hSession)
-	{
-		WinHttpCloseHandle(m_hSession);
-		m_hSession = nullptr;
-	}
-}
-
-VOID CALLBACK http::http_callback(HINTERNET, const DWORD_PTR dwContext, const DWORD dwInternetStatus,
-                                  const LPVOID lpvStatusInformation, const DWORD dwStatusInformationLength)
-{
-	const auto request = reinterpret_cast<http_request*>(dwContext);
-	if (!request) return;
-
-	DWORD dwError = ERROR_SUCCESS;
-
-	switch (dwInternetStatus)
-	{
-	case WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE:
-		dwError = request->on_send_request_complete();
-		break;
-	case WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE:
-		dwError = request->on_headers_available();
-		break;
-	case WINHTTP_CALLBACK_STATUS_READ_COMPLETE:
-		dwError = request->on_read_complete(dwStatusInformationLength);
-		break;
-	case WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING:
-		request->on_handle_closing();
-		return; // request may be destroyed; do not touch further
-	case WINHTTP_CALLBACK_STATUS_REQUEST_ERROR:
-		dwError = request->on_request_error(static_cast<WINHTTP_ASYNC_RESULT*>(lpvStatusInformation)->dwError);
-		break;
-	default:
-		break;
-	}
-
-	if (dwError != ERROR_SUCCESS)
-	{
-		request->cancel();
-	}
-}
-
-bool http::download_file(const std::string& url, const std::shared_ptr<http_request>& request)
-{
-	OutputDebugStringA(std::format("Download {}\n", url).c_str());
-
-	if (!request || !m_hSession) return false;
-
-	request->set_parent(this);
-
-	// Register BEFORE issuing the request so callbacks (which can fire on another
-	// thread the moment WinHttpSendRequest returns) always find a live shared_ptr.
-	{
-		std::lock_guard lock(m_mutex);
-		m_requests.push_back(request);
-	}
-
-	if (!request->create(url, m_hSession))
-	{
-		// create() failed before any callback could fire; un-register.
-		std::lock_guard lock(m_mutex);
-		std::erase(m_requests, request);
-		return false;
-	}
-	return true;
-}
-
-void http::remove_request(const std::shared_ptr<http_request>& request)
-{
-	std::lock_guard lock(m_mutex);
-	std::erase(m_requests, request);
-}
-
-void http::stop()
-{
-	// Snapshot under lock, then cancel without holding it -- cancel() takes the
-	// per-request mutex and we must not hold http::m_mutex across that.
-	std::vector<std::shared_ptr<http_request>> snapshot;
-	{
-		std::lock_guard lock(m_mutex);
-		snapshot = m_requests;
-	}
-	for (const auto& r : snapshot)
-	{
-		r->cancel();
-	}
-}
-
-//////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////
-
-http_request::http_request(callback_t callback) : m_callback(std::move(callback))
-{
-	WCHAR folder[MAX_PATH];
-	WCHAR path[MAX_PATH];
-
-	GetTempPathW(MAX_PATH, folder);
-	GetTempFileNameW(folder, L"pot", 0, path);
-
-	m_file = to_utf8(path);
-	m_hFile = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-	                      CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
-}
-
-http_request::~http_request()
-{
-	cancel();
-
-	if (m_hFile != INVALID_HANDLE_VALUE)
-	{
-		CloseHandle(m_hFile);
-		m_hFile = INVALID_HANDLE_VALUE;
-	}
-}
-
-bool http_request::create(const std::string& url_in, const HINTERNET hSession)
-{
-	m_url = url_in;
-	m_error = ERROR_SUCCESS;
-
-	if (!starts(m_url, "http://") && !starts(m_url, "https://"))
-	{
-		m_url = "https://" + m_url;
-	}
-
-	const auto wurl = to_utf16(m_url);
-
-	URL_COMPONENTS urlComp{};
-	urlComp.dwStructSize = sizeof(urlComp);
-	urlComp.dwSchemeLength = static_cast<DWORD>(-1);
-	urlComp.dwHostNameLength = static_cast<DWORD>(-1);
-	urlComp.dwUrlPathLength = static_cast<DWORD>(-1);
-	urlComp.dwExtraInfoLength = static_cast<DWORD>(-1);
-
-	if (!WinHttpCrackUrl(wurl.c_str(), static_cast<DWORD>(wurl.size()), 0, &urlComp))
-	{
-		return false;
-	}
-
-	const std::wstring host(urlComp.lpszHostName, urlComp.dwHostNameLength);
-	std::wstring path(urlComp.lpszUrlPath, urlComp.dwUrlPathLength);
-	if (urlComp.dwExtraInfoLength)
-	{
-		path.append(urlComp.lpszExtraInfo, urlComp.dwExtraInfoLength);
-	}
-
-	const DWORD flags = (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
-
-	HINTERNET hConn = WinHttpConnect(hSession, host.c_str(), urlComp.nPort, 0);
-	if (!hConn) return false;
-
-	PCWSTR acceptTypes[] = {L"*/*", nullptr};
-	HINTERNET hReq = WinHttpOpenRequest(hConn, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
-	                                    acceptTypes, flags);
-	if (!hReq)
-	{
-		WinHttpCloseHandle(hConn);
-		return false;
-	}
-
-	// Tell the server we accept compressed responses (the session-level decompression
-	// option will transparently decode them for us).
-	const std::wstring extra_headers = L"Accept-Encoding: gzip, deflate\r\n";
-	WinHttpAddRequestHeaders(hReq, extra_headers.c_str(), static_cast<DWORD>(extra_headers.size()),
-	                         WINHTTP_ADDREQ_FLAG_ADD);
-
-	// Publish handles, then send. The send must come AFTER assigning to members so
-	// that a callback firing on another thread can safely use them via on_*.
-	{
-		std::lock_guard lock(m_handle_mutex);
-		m_hConnection = hConn;
-		m_hRequest = hReq;
-	}
-
-	if (!WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0,
-	                        reinterpret_cast<DWORD_PTR>(this)))
-	{
-		cancel();
-		return false;
-	}
-
-	return true;
-}
-
-void http_request::cancel()
-{
-	HINTERNET hReq = nullptr;
-	HINTERNET hConn = nullptr;
-	{
-		std::lock_guard lock(m_handle_mutex);
-		hReq = m_hRequest;
-		hConn = m_hConnection;
-		m_hRequest = nullptr;
-		m_hConnection = nullptr;
-	}
-	// Close OUTSIDE the lock; closing a handle can synchronously invoke the
-	// HANDLE_CLOSING callback which would otherwise reenter via on_handle_closing.
-	if (hReq) WinHttpCloseHandle(hReq);
-	if (hConn) WinHttpCloseHandle(hConn);
-}
-
-DWORD http_request::on_send_request_complete()
-{
-	HINTERNET h = nullptr;
-	{
-		std::lock_guard lock(m_handle_mutex);
-		h = m_hRequest;
-	}
-	if (!h) return ERROR_OPERATION_ABORTED;
-	return WinHttpReceiveResponse(h, nullptr) ? ERROR_SUCCESS : GetLastError();
-}
-
-DWORD http_request::on_headers_available()
-{
-	HINTERNET h = nullptr;
-	{
-		std::lock_guard lock(m_handle_mutex);
-		h = m_hRequest;
-	}
-	if (!h) return ERROR_OPERATION_ABORTED;
-
-	on_headers_ready(h);
-
-	m_status = 0;
-	DWORD statusLen = sizeof(m_status);
-	if (!WinHttpQueryHeaders(h, WINHTTP_QUERY_FLAG_NUMBER | WINHTTP_QUERY_STATUS_CODE, nullptr, &m_status,
-	                         &statusLen, nullptr))
-	{
-		return GetLastError();
-	}
-
-	WCHAR buf[64];
-	DWORD len = sizeof(buf);
-	m_content_length = WinHttpQueryHeaders(h, WINHTTP_QUERY_CONTENT_LENGTH, nullptr, buf, &len, nullptr)
-		                   ? _wtoi64(buf)
-		                   : 0;
-	m_downloaded_length = 0;
-
-	return read_data();
-}
-
-DWORD http_request::on_handle_closing()
-{
-	if (m_finished.exchange(true)) return ERROR_SUCCESS;
-
-	WCHAR errMsg[256] = {};
-	if (m_error)
-	{
-		FormatMessage(FORMAT_MESSAGE_FROM_HMODULE | FORMAT_MESSAGE_FROM_SYSTEM,
-		              GetModuleHandleA("winhttp.dll"), m_error, 0, errMsg, _countof(errMsg), nullptr);
-	}
-
-	on_finish(m_error, errMsg);
-
-	// Keep ourselves alive across the un-registration: once removed from
-	// http::m_requests this could be the last reference.
-	if (m_http)
-	{
-		auto self = shared_from_this();
-		m_http->remove_request(self);
-	}
-	return ERROR_SUCCESS;
-}
-
-DWORD http_request::on_request_error(const DWORD dwError)
-{
-	m_error = dwError;
-	return dwError;
-}
-
-DWORD http_request::read_data()
-{
-	HINTERNET h = nullptr;
-	{
-		std::lock_guard lock(m_handle_mutex);
-		h = m_hRequest;
-	}
-	if (!h) return ERROR_OPERATION_ABORTED;
-	return WinHttpReadData(h, m_buffer, sizeof(m_buffer), nullptr) ? ERROR_SUCCESS : GetLastError();
-}
-
-DWORD http_request::on_read_complete(const DWORD len)
-{
-	if (len == 0)
-	{
-		cancel();
-		return ERROR_SUCCESS;
-	}
-
-	m_downloaded_length += len;
-	on_data(m_buffer, len, m_downloaded_length, m_content_length);
-	return read_data();
-}
-
-void http_request::on_headers_ready(HINTERNET)
-{
-}
-
-void http_request::on_finish(const DWORD dwError, LPCWSTR /*errMsg*/)
-{
-	if (m_hFile != INVALID_HANDLE_VALUE)
-	{
-		CloseHandle(m_hFile);
-		m_hFile = INVALID_HANDLE_VALUE;
-	}
-
-	auto cb = m_callback;
-	auto f = m_file;
-	auto err = dwError;
-	auto status = m_status;
-	auto url = m_url;
-
-	dispatch_to_ui([cb = std::move(cb), f = std::move(f), err, status, url = std::move(url)]()
-	{
-		if (cb) cb(f, err, status, url);
-	});
-}
-
-void http_request::on_data(const LPCBYTE data, const DWORD len, ULONG64 /*downloaded*/, ULONG64 /*total*/)
-{
-	if (m_hFile != INVALID_HANDLE_VALUE)
-	{
-		DWORD written = 0;
-		WriteFile(m_hFile, data, len, &written, nullptr);
-	}
-}
-#endif
 
 
 html_entities g_html_entities[] =
@@ -784,7 +520,919 @@ omitted_end_tags_t parser::m_omitted_end_tags[] =
 };
 
 
-std::unique_ptr<element> parser::create_element(const std::string& tag_name)
+// ── html_scanner ────────────────────────────────────────────────────────────
+
+namespace
+{
+	uint32_t lookup_entity(const std::string_view name)
+	{
+		uint32_t fallback = 0;
+
+		for (int i = 0; g_html_entities[i].szCode[0]; i++)
+		{
+			// Table entries are stored as "&name;".
+			const char* code = g_html_entities[i].szCode + 1;
+			const size_t n = strlen(code);
+			if (n != name.size() + 1 || code[name.size()] != ';') continue;
+
+			if (memcmp(code, name.data(), name.size()) == 0)
+			{
+				return g_html_entities[i].Code;
+			}
+			if (!fallback && _strnicmp(code, name.data(), name.size()) == 0)
+			{
+				fallback = g_html_entities[i].Code;
+			}
+		}
+
+		return fallback;
+	}
+
+	int hex_digit(const char c)
+	{
+		if (c >= '0' && c <= '9') return c - '0';
+		if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+		if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+		return -1;
+	}
+}
+
+bool html_scanner::starts_ci(const size_t at, const std::string_view with) const
+{
+	if (at + with.size() > m_src.size()) return false;
+	for (size_t i = 0; i < with.size(); ++i)
+		if (lower(m_src[at + i]) != lower(with[i])) return false;
+	return true;
+}
+
+size_t html_scanner::find_ci(const std::string_view needle, const size_t from) const
+{
+	if (needle.empty() || needle.size() > m_src.size()) return std::string_view::npos;
+
+	const char lo = lower(needle[0]);
+	const char up = lo >= 'a' && lo <= 'z' ? static_cast<char>(lo - 'a' + 'A') : lo;
+
+	for (size_t i = from; i + needle.size() <= m_src.size(); ++i)
+	{
+		const char c = m_src[i];
+		if (c != lo && c != up) continue;
+		if (starts_ci(i, needle)) return i;
+	}
+
+	return std::string_view::npos;
+}
+
+bool html_scanner::decode_entity(std::string& out)
+{
+	const size_t start = m_pos; // just past '&'
+
+	if (peek() == '#')
+	{
+		size_t p = m_pos + 1;
+		uint32_t cp = 0;
+		bool any = false;
+
+		if (p < m_src.size() && (m_src[p] == 'x' || m_src[p] == 'X'))
+		{
+			++p;
+			for (int d; p < m_src.size() && (d = hex_digit(m_src[p])) >= 0; ++p)
+			{
+				cp = cp * 16 + d;
+				any = true;
+				if (cp > 0x10FFFF) break;
+			}
+		}
+		else
+		{
+			for (; p < m_src.size() && m_src[p] >= '0' && m_src[p] <= '9'; ++p)
+			{
+				cp = cp * 10 + (m_src[p] - '0');
+				any = true;
+				if (cp > 0x10FFFF) break;
+			}
+		}
+
+		if (any && cp && cp <= 0x10FFFF)
+		{
+			if (p < m_src.size() && m_src[p] == ';') ++p;
+			m_pos = p;
+			pf::char32_to_utf8(std::back_inserter(out), cp);
+			return true;
+		}
+	}
+	else
+	{
+		size_t p = m_pos;
+		while (p < m_src.size() && isalnum(static_cast<unsigned char>(m_src[p]))) ++p;
+
+		if (p > m_pos)
+		{
+			if (const uint32_t cp = lookup_entity(m_src.substr(m_pos, p - m_pos)))
+			{
+				if (p < m_src.size() && m_src[p] == ';') ++p;
+				m_pos = p;
+				pf::char32_to_utf8(std::back_inserter(out), cp);
+				return true;
+			}
+		}
+	}
+
+	// Not a recognised reference — emit the ampersand literally.
+	out += '&';
+	m_pos = start;
+	return false;
+}
+
+token_type html_scanner::scan_text()
+{
+	if (at_end()) return TT_EOF;
+
+	const char c0 = m_src[m_pos];
+
+	if (c0 == '<')
+	{
+		++m_pos;
+		return scan_tag();
+	}
+
+	if (c0 != '&' && is_ws(c0))
+	{
+		const size_t ws_start = m_pos;
+		skip_ws();
+		m_value = m_src.substr(ws_start, m_pos - ws_start);
+		return TT_SPACE;
+	}
+
+	// A run of non-space text. Only the first character may be an entity —
+	// the run always terminates at the next '&' — so the decode buffer is
+	// needed at most once per token.
+	bool decoded = false;
+
+	if (c0 == '&')
+	{
+		m_decoded.clear();
+		++m_pos;
+		decode_entity(m_decoded);
+		decoded = true;
+	}
+
+	const size_t start = m_pos;
+
+	while (m_pos < m_src.size())
+	{
+		const char c = m_src[m_pos];
+		if (c == '<' || c == '&' || is_ws(c)) break;
+
+		const size_t n = seq_len(m_pos);
+		const uint32_t cp = n > 1 ? codepoint_at(m_pos) : static_cast<uint8_t>(c);
+		m_pos += n;
+
+		// One token per CJK codepoint so lines can break between them.
+		if (cp >= 0x4E00 && cp <= 0x9FCC) break;
+	}
+
+	if (decoded)
+	{
+		m_decoded.append(m_src.substr(start, m_pos - start));
+		m_value = m_decoded;
+	}
+	else
+	{
+		m_value = m_src.substr(start, m_pos - start);
+	}
+
+	return TT_WORD;
+}
+
+// '<' has already been consumed.
+token_type html_scanner::scan_tag()
+{
+	const bool is_tail = peek() == '/';
+	if (is_tail) ++m_pos;
+
+	if (!is_tail)
+	{
+		if (starts_ci(m_pos, "!--"))
+		{
+			m_pos += 3;
+			m_close = "-->";
+			m_end_token = TT_COMMENT_END;
+			m_scan = &html_scanner::scan_delimited;
+			return TT_COMMENT_START;
+		}
+		if (starts_ci(m_pos, "![CDATA["))
+		{
+			m_pos += 8;
+			m_close = "]]>";
+			m_end_token = TT_CDATA_END;
+			m_scan = &html_scanner::scan_delimited;
+			return TT_CDATA_START;
+		}
+		if (starts_ci(m_pos, "!DOCTYPE"))
+		{
+			m_pos += 8;
+			m_end_token = TT_DOCTYPE_END;
+			m_scan = &html_scanner::scan_markup_decl;
+			return TT_DOCTYPE_START;
+		}
+		if (starts_ci(m_pos, "!ENTITY"))
+		{
+			m_pos += 7;
+			m_end_token = TT_ENTITY_END;
+			m_scan = &html_scanner::scan_markup_decl;
+			return TT_ENTITY_START;
+		}
+		if (peek() == '?')
+		{
+			++m_pos;
+			m_close = "?>";
+			m_end_token = TT_PI_END;
+			m_scan = &html_scanner::scan_delimited;
+			return TT_PI_START;
+		}
+	}
+
+	m_tag_store.clear();
+
+	while (!at_end())
+	{
+		const char c = m_src[m_pos];
+		if (is_ws(c) || c == '/' || c == '>') break;
+		m_tag_store += lower(c);
+		++m_pos;
+	}
+
+	m_tag_name = m_tag_store;
+
+	if (is_tail)
+	{
+		while (!at_end() && m_src[m_pos] != '>') ++m_pos;
+		if (!at_end()) ++m_pos;
+		m_scan = &html_scanner::scan_text;
+		return TT_TAG_END;
+	}
+
+	m_scan = &html_scanner::scan_attributes;
+	return TT_TAG_START;
+}
+
+token_type html_scanner::enter_content()
+{
+	// Raw text elements: everything up to the matching close tag is data.
+	if (m_tag_store == "script" || m_tag_store == "style")
+	{
+		m_scan = &html_scanner::scan_raw_text;
+		return scan_raw_text();
+	}
+
+	m_scan = &html_scanner::scan_text;
+	return scan_text();
+}
+
+void html_scanner::scan_attr_value()
+{
+	const char q = peek();
+	const bool quoted = q == '"' || q == '\'';
+	if (quoted) ++m_pos;
+
+	const size_t start = m_pos;
+	size_t copied = start;
+	bool decoded = false;
+
+	while (!at_end())
+	{
+		const char c = m_src[m_pos];
+		if (quoted ? c == q : is_ws(c) || c == '>') break;
+
+		if (c == '&')
+		{
+			if (!decoded)
+			{
+				m_decoded.clear();
+				decoded = true;
+			}
+			m_decoded.append(m_src.substr(copied, m_pos - copied));
+			++m_pos;
+			decode_entity(m_decoded);
+			copied = m_pos;
+			continue;
+		}
+
+		++m_pos;
+	}
+
+	if (decoded)
+	{
+		m_decoded.append(m_src.substr(copied, m_pos - copied));
+		m_value = m_decoded;
+	}
+	else
+	{
+		m_value = m_src.substr(start, m_pos - start);
+	}
+
+	if (quoted && peek() == q) ++m_pos;
+}
+
+token_type html_scanner::scan_attributes()
+{
+	for (;;)
+	{
+		skip_ws();
+		if (at_end()) return TT_EOF;
+
+		const char c = m_src[m_pos];
+
+		if (c == '>')
+		{
+			++m_pos;
+			return enter_content();
+		}
+
+		if (c == '/')
+		{
+			++m_pos;
+			skip_ws();
+			if (peek() == '>')
+			{
+				++m_pos;
+				m_scan = &html_scanner::scan_text;
+				return TT_TAG_END_EMPTY;
+			}
+			continue;
+		}
+
+		if (c == '=' || c == '<')
+		{
+			++m_pos; // stray delimiter — resync
+			continue;
+		}
+
+		m_attr_store.clear();
+		while (!at_end())
+		{
+			const char n = m_src[m_pos];
+			if (is_ws(n) || n == '=' || n == '>' || n == '/') break;
+			m_attr_store += lower(n);
+			++m_pos;
+		}
+		m_attr_name = m_attr_store;
+		m_value = {};
+
+		const size_t after_name = m_pos;
+		skip_ws();
+
+		if (peek() != '=')
+		{
+			m_pos = after_name; // valueless attribute
+			return TT_ATTR;
+		}
+
+		++m_pos;
+		skip_ws();
+		scan_attr_value();
+		return TT_ATTR;
+	}
+}
+
+token_type html_scanner::scan_raw_text()
+{
+	if (m_got_tail)
+	{
+		m_got_tail = false;
+		m_scan = &html_scanner::scan_text;
+		return TT_TAG_END;
+	}
+
+	const std::string close = "</" + m_tag_store;
+	const size_t at = find_ci(close, m_pos);
+
+	m_value = m_src.substr(m_pos, (at == std::string_view::npos ? m_src.size() : at) - m_pos);
+
+	if (at == std::string_view::npos)
+	{
+		m_pos = m_src.size();
+	}
+	else
+	{
+		m_pos = at + close.size();
+		while (!at_end() && m_src[m_pos] != '>') ++m_pos;
+		if (!at_end()) ++m_pos;
+	}
+
+	m_got_tail = true;
+	return TT_DATA;
+}
+
+token_type html_scanner::scan_delimited()
+{
+	if (m_got_tail)
+	{
+		m_got_tail = false;
+		m_scan = &html_scanner::scan_text;
+		return m_end_token;
+	}
+
+	const size_t at = m_src.find(m_close, m_pos);
+
+	m_value = m_src.substr(m_pos, (at == std::string_view::npos ? m_src.size() : at) - m_pos);
+	m_pos = at == std::string_view::npos ? m_src.size() : at + m_close.size();
+	m_got_tail = true;
+	return TT_DATA;
+}
+
+token_type html_scanner::scan_markup_decl()
+{
+	if (m_got_tail)
+	{
+		m_got_tail = false;
+		m_scan = &html_scanner::scan_text;
+		return m_end_token;
+	}
+
+	const size_t start = m_pos;
+	bool in_quote = false;
+
+	while (!at_end())
+	{
+		const char c = m_src[m_pos];
+		if (c == '"') in_quote = !in_quote;
+		else if (c == '>' && !in_quote) break;
+		++m_pos;
+	}
+
+	m_value = m_src.substr(start, m_pos - start);
+	if (!at_end()) ++m_pos;
+	m_got_tail = true;
+	return TT_DATA;
+}
+
+// Render a token stream as a compact string so expectations stay readable.
+static std::string dump_tokens(const std::string_view html)
+{
+	html_scanner sc(html);
+	std::string out;
+
+	for (;;)
+	{
+		const token_type t = sc.get_token();
+		if (t == TT_EOF) break;
+
+		if (!out.empty()) out += ' ';
+
+		switch (t)
+		{
+		case TT_TAG_START: out += "<" + std::string(sc.get_tag_name());
+			break;
+		case TT_TAG_END: out += "</" + std::string(sc.get_tag_name());
+			break;
+		case TT_TAG_END_EMPTY: out += "/>";
+			break;
+		case TT_ATTR: out += std::string(sc.get_attr_name()) + "=" + std::string(sc.get_value());
+			break;
+		case TT_WORD: out += "w:" + std::string(sc.get_value());
+			break;
+		case TT_SPACE: out += "_";
+			break;
+		case TT_DATA: out += "d:" + std::string(sc.get_value());
+			break;
+		case TT_COMMENT_START: out += "<!--";
+			break;
+		case TT_COMMENT_END: out += "-->";
+			break;
+		case TT_CDATA_START: out += "<![";
+			break;
+		case TT_CDATA_END: out += "]]";
+			break;
+		case TT_DOCTYPE_START: out += "<!doctype";
+			break;
+		case TT_DOCTYPE_END: out += "doctype>";
+			break;
+		case TT_PI_START: out += "<?";
+			break;
+		case TT_PI_END: out += "?>";
+			break;
+		default: out += "?";
+			break;
+		}
+	}
+
+	return out;
+}
+
+static void should_scan_tags_and_attributes()
+{
+	should::equal("<a href=/x?a=1&b=2 disabled= w:hi </a",
+	              dump_tokens(R"(<A HREF="/x?a=1&amp;b=2" DISABLED>hi</A>)").c_str());
+}
+
+static void should_scan_unquoted_and_empty_attributes()
+{
+	should::equal("<img src=a.png alt= /> w:t",
+	              dump_tokens("<img src=a.png alt=\"\" />t").c_str());
+}
+
+static void should_decode_entities()
+{
+	// Named, decimal, hex (astral plane) and an unterminated reference. A word
+	// run always ends at '&', so each reference starts a fresh token.
+	should::equal("w:& w:< w:> _ w:A _ w:\xF0\x9F\x98\x80 _ w:&notanentity",
+	              dump_tokens("&amp;&lt;&gt; &#65; &#x1F600; &notanentity").c_str());
+}
+
+static void should_scan_raw_text_elements()
+{
+	// The content of <style> must survive verbatim, including '<' and entities.
+	should::equal("<style d:a{content:\"<b>&amp;\"} </style _ <p w:x </p",
+	              dump_tokens("<style>a{content:\"<b>&amp;\"}</style> <p>x</p>").c_str());
+}
+
+static void should_scan_comments_and_doctype()
+{
+	should::equal("<!doctype d: html doctype> _ <!-- d: c  --> _ w:x",
+	              dump_tokens("<!DOCTYPE html> <!-- c --> x").c_str());
+}
+
+static void should_split_cjk_words()
+{
+	// One token per ideograph so lines may break between them.
+	should::equal("w:\xE6\x97\xA5 w:\xE6\x9C\xAC w:ab", dump_tokens("\xE6\x97\xA5\xE6\x9C\xAC" "ab").c_str());
+}
+
+static void should_terminate_on_malformed_markup()
+{
+	// Unclosed tag, unterminated comment and unterminated raw text must all
+	// reach EOF with their regions implicitly closed.
+	should::equal("<div class=x", dump_tokens("<div class=x").c_str());
+	should::equal("<!-- d: never closed -->", dump_tokens("<!-- never closed").c_str());
+	should::equal("<style d:oops </style", dump_tokens("<style>oops").c_str());
+}
+
+static void should_detect_charset()
+{
+	// Declared windows-1252 in a meta tag: 0x93/0x94 are curly quotes.
+	const std::string src = "<meta charset=\"windows-1252\"><p>\x93hi\x94";
+	should::equal("<meta charset=windows-1252 <p w:\xE2\x80\x9Chi\xE2\x80\x9D",
+	              dump_tokens(decode_to_utf8(src, "")).c_str());
+
+	// A UTF-8 BOM is stripped, and a header charset wins over sniffing.
+	should::equal("a", decode_to_utf8("\xEF\xBB\xBF" "a", "").c_str());
+	should::equal("\xC2\xA9", decode_to_utf8("\xA9", "text/html; charset=iso-8859-1").c_str());
+}
+
+void register_scanner_tests(tests& t)
+{
+	t.register_test("Scanner: tags and attributes", should_scan_tags_and_attributes);
+	t.register_test("Scanner: unquoted and empty attributes", should_scan_unquoted_and_empty_attributes);
+	t.register_test("Scanner: entity decoding", should_decode_entities);
+	t.register_test("Scanner: raw text elements", should_scan_raw_text_elements);
+	t.register_test("Scanner: comments and doctype", should_scan_comments_and_doctype);
+	t.register_test("Scanner: CJK word splitting", should_split_cjk_words);
+	t.register_test("Scanner: malformed markup terminates", should_terminate_on_malformed_markup);
+	t.register_test("Charset detection", should_detect_charset);
+}
+
+
+// A view that accepts everything and shows nothing, so a document can be laid
+// out with no window behind it.
+namespace
+{
+	struct silent_view final : view_host
+	{
+		bool verbose = false;
+
+		void layout() override
+		{
+		}
+
+		void invalidate() override
+		{
+		}
+
+		void open(const std::string&) override
+		{
+		}
+
+		void diagnostic(const std::string& message) override
+		{
+			if (verbose) pf::write_stdout("  " + message + "\n");
+		}
+
+		void resource_started(const std::string& type, const std::string& url) override
+		{
+			if (verbose) pf::write_stdout(std::format("  {} requested: {}\n", type, url));
+		}
+
+		void resource_finished(const std::string& type, const std::string& url, const bool ok) override
+		{
+			if (verbose) pf::write_stdout(std::format("  {} {}: {}\n", type, ok ? "loaded" : "failed", url));
+		}
+	};
+}
+
+// Runs parse -> cascade -> layout with no window and no message loop, so no
+// async stylesheet or image ever lands. Same input therefore gives same output.
+layout_result layout_html_headless(const std::string& html, const int width, const int height,
+								   const bool verbose, const int dump_depth, const bool dump_json)
+{
+	layout_result result;
+	silent_view view;
+	view.verbose = verbose;
+
+	const auto t0 = std::chrono::steady_clock::now();
+	const auto doc = document::create_from_bytes(view, "https://example.invalid/", html, "text/html");
+	const auto t1 = std::chrono::steady_clock::now();
+
+	if (!doc) return result;
+
+	const position client_pos(0, 0, width, height);
+	doc->client_pos(client_pos);
+	doc->render(width);
+	const auto t2 = std::chrono::steady_clock::now();
+
+	result.width = doc->width();
+	result.height = doc->height();
+	result.parse_style_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+	result.layout_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+	result.stats = doc->analyse_layout(&result.anomalies);
+	if (dump_depth > 0) result.box_dump = doc->dump_boxes(dump_depth);
+	if (dump_json) result.layout_json = doc->dump_layout_json();
+	return result;
+}
+
+// Lays out a snippet and returns the box of the element with the given id, in
+// document coordinates. An empty box means the id was not found.
+position layout_html_headless_probe(const std::string& html, const int width, const std::string& id)
+{
+	silent_view view;
+	const auto doc = document::create_from_bytes(view, "https://example.invalid/", html, "text/html");
+	if (!doc) return {};
+
+	doc->client_pos(position(0, 0, width, 896));
+	doc->render(width);
+
+	position found;
+	std::function<bool(const element*, int, int)> visit =
+		[&](const element* el, const int parent_x, const int parent_y)
+	{
+		const int x = parent_x + el->left();
+		const int y = parent_y + el->top();
+
+		if (el->get_attr("id") == id)
+		{
+			found = position(x, y, el->width(), el->height());
+			return true;
+		}
+
+		for (size_t i = 0; i < el->get_children_count(); ++i)
+			if (visit(el->get_child(static_cast<int>(i)), x, y)) return true;
+
+		return false;
+	};
+
+	visit(doc->root(), 0, 0);
+	return found;
+}
+
+
+// Layout regressions on real pages. The fixtures are large and live outside the
+// source tree, so a machine without them runs the rest of the suite instead.
+// These sizes are a change detector, not a statement that the page is correct.
+static void should_lay_out_fixture(const char* name, const int expect_w, const int expect_h)
+{
+	const auto html = get_file_contents(std::string("test-files/") + name);
+	if (html.empty()) return;
+
+	const auto r = layout_html_headless(html, 1902, 896);
+	should::equal(expect_w, r.width, (std::string(name) + " width").c_str());
+	should::equal(expect_h, r.height, (std::string(name) + " height").c_str());
+}
+
+// Lays out a self-contained snippet at a fixed width and returns the box of the
+// first element carrying the given id.
+static position should_box_of(const std::string& html, const char* id, const int width = 1000)
+{
+	return layout_html_headless_probe(html, width, id);
+}
+
+void register_layout_tests(tests& t)
+{
+	t.register_test("Layout: repeated render is stable", []
+	{
+		const auto html = get_file_contents("test-files/site-elements.html");
+		if (html.empty()) return;
+
+		silent_view view;
+		const auto doc = document::create_from_bytes(view, "https://example.invalid/", html, "text/html");
+		should::EqualTrue(doc != nullptr, "fixture document");
+		doc->client_pos(position(0, 0, 1888, 871));
+		doc->render(1902);
+		doc->render(1888);
+		const int first_height = doc->height();
+		const auto probe_box = [&](const std::string_view key)
+		{
+			position result;
+			bool found = false;
+			std::function<void(const element*, int, int)> visit = [&](const element* el, const int parent_x,
+			                                                          const int parent_y)
+			{
+				if (found) return;
+				const int x = parent_x + el->left();
+				const int y = parent_y + el->top();
+				if (el->get_attr("data-probe") == key)
+				{
+					result = position(x, y, el->width(), el->height());
+					found = true;
+					return;
+				}
+				for (size_t index = 0; index < el->get_children_count(); ++index)
+					visit(el->get_child(static_cast<int>(index)), x, y);
+			};
+			visit(doc->root(), 0, 0);
+			return result;
+		};
+		const std::vector<position> first_sections = {
+			probe_box("page"), probe_box("search-section"), probe_box("news-section"),
+			probe_box("gallery-section"), probe_box("article-section"), probe_box("footer")
+		};
+		doc->render(1902);
+		doc->render(1888);
+		const std::vector<position> second_sections = {
+			probe_box("page"), probe_box("search-section"), probe_box("news-section"),
+			probe_box("gallery-section"), probe_box("article-section"), probe_box("footer")
+		};
+		should::equal(first_sections[0].height, second_sections[0].height, "repeated page height");
+		should::equal(first_sections[1].y, second_sections[1].y, "repeated search y");
+		should::equal(first_sections[2].y, second_sections[2].y, "repeated news y");
+		should::equal(first_sections[3].y, second_sections[3].y, "repeated gallery y");
+		should::equal(first_sections[4].y, second_sections[4].y, "repeated article y");
+		should::equal(first_sections[5].y, second_sections[5].y, "repeated footer y");
+		should::equal(first_height, doc->height(), "repeated document height");
+	});
+
+	t.register_test("Layout: wikipedia main page", []
+	{
+		should_lay_out_fixture("wikipedia-main-page.html", 1902, 14921);
+	});
+	t.register_test("Layout: wikipedia web browser", []
+	{
+		should_lay_out_fixture("wikipedia-web-browser.html", 2065, 15126);
+	});
+	t.register_test("Layout: wikipedia comparison table", []
+	{
+		should_lay_out_fixture("wikipedia-comparison-of-web-browsers.html", 2065, 36898);
+	});
+	t.register_test("Layout: bbc news", []
+	{
+		should_lay_out_fixture("bbc-news.html", 1904, 5365);
+	});
+
+	// Selector bucketing reads id/class before parse_styles runs, so these
+	// rules were silently dropped on the first cascade.
+	t.register_test("Style: class selector applies to first layout", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>.w{width:300px;height:40px}</style></head>"
+			"<body><div id='t' class='w'>x</div></body></html>", "t");
+		should::equal(300, box.width, "class selector width");
+		should::equal(40, box.height, "class selector height");
+	});
+	t.register_test("Style: id selector applies to first layout", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#t{width:250px;height:40px}</style></head>"
+			"<body><div id='t'>x</div></body></html>", "t");
+		should::equal(250, box.width, "id selector width");
+		should::equal(40, box.height, "id selector height");
+	});
+
+	// calc() carries its own parts and never sets units, so cvt_units used to
+	// read an unset value and collapse the box to nothing.
+	t.register_test("Style: calc max-width constrains rather than collapses", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{width:1000px}#t{width:100%;max-width:calc(100% - 32px)}</style></head>"
+			"<body><div id='h'><div id='t'>x</div></div></body></html>", "t");
+		should::equal(968, box.width, "calc max-width");
+	});
+	t.register_test("Style: calc max-width above available width does not bind", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{width:1000px}#t{width:100%;max-width:calc(1280px - 32px)}</style></head>"
+			"<body><div id='h'><div id='t'>x</div></div></body></html>", "t");
+		should::equal(1000, box.width, "calc max-width slack");
+	});
+
+	// Grid and flex items are blockified, so an inline value on a child must not
+	// shrink it to nothing.
+	t.register_test("Style: grid items are blockified", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{width:600px;display:grid}#t{display:initial}</style></head>"
+			"<body><div id='h'><div id='t'>x</div></div></body></html>", "t");
+		should::equal(600, box.width, "grid item width");
+	});
+
+	t.register_test("Layout: flex auto basis uses intrinsic width", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{display:flex;width:600px}#t{font-size:20px;line-height:30px}</style></head>"
+			"<body><div id='h'><div id='t'>brand words</div></div></body></html>", "t");
+		should::EqualTrue(box.width > 0, "auto flex item width");
+		should::equal(30, box.height, "auto flex item stays on one line");
+	});
+	t.register_test("Layout: nested flex reports intrinsic width", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h,#t{display:flex}#h{width:600px}</style></head>"
+			"<body><div id='h'><div id='t'><span>one</span><span>two</span></div></div></body></html>", "t");
+		should::EqualTrue(box.width > 0, "nested flex item width");
+	});
+	t.register_test("Layout: flex ignores formatting whitespace", []
+	{
+		const auto compact = should_box_of(
+			"<html><head><style>#h{display:flex;gap:16px;width:600px}</style></head>"
+			"<body><div id='h'><div>one</div><div id='t'>two</div></div></body></html>", "t");
+		const auto formatted = should_box_of(
+			"<html><head><style>#h{display:flex;gap:16px;width:600px}</style></head>"
+			"<body><div id='h'>\n  <div>one</div>\n  <div id='t'>two</div>\n</div></body></html>", "t");
+		should::equal(compact.x, formatted.x, "formatted flex item x");
+	});
+	t.register_test("Layout: flex shrink preserves automatic content minimum", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{display:flex;width:200px}#a{width:100%;min-width:0}#t{padding:0 20px}</style></head>"
+			"<body><div id='h'><div id='a'>input</div><button id='t'>Search</button></div></body></html>", "t");
+		should::EqualTrue(box.width > 40, "flex item automatic minimum");
+	});
+	t.register_test("Layout: flex cross size counts padding once", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{display:flex}#t{line-height:18px;padding:8px 18px;border:1px solid}</style></head>"
+			"<body><div id='h'><button id='t'>Search</button></div></body></html>", "t");
+		should::equal(36, box.height, "padded flex item height");
+	});
+	t.register_test("Style: font inherit shorthand includes line height", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{font-size:16px;line-height:24px}#t{display:inline-block;font:inherit;padding:8px;border:1px solid}</style></head>"
+			"<body><div id='h'><button id='t'>Search</button></div></body></html>", "t");
+		should::equal(42, box.height, "inherited font line height");
+	});
+	t.register_test("Layout: padded input sets flex line height", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{display:flex;font-size:16px;line-height:24px}#h>*{font:inherit;border:1px solid}"
+			"#i{padding:10px 16px}#b{padding:8px 18px}</style></head>"
+			"<body><div id='h'><input id='i'><button id='b'>Search</button></div></body></html>", "i");
+		should::equal(46, box.height, "padded input flex height");
+	});
+	t.register_test("Layout: flex item content width excludes edges once", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{display:flex}#b{font-size:16px;line-height:24px;padding:8px 13px;border:1px solid}</style></head>"
+			"<body><div id='h'><button id='b'>Potato Search</button></div></body></html>", "b");
+		should::equal(42, box.height, "single-line padded flex item");
+	});
+	t.register_test("Layout: percentage flex basis controls wrapping", []
+	{
+		const std::string html =
+			"<html><head><style>#h{display:flex;flex-wrap:wrap;width:300px;gap:18px}#a{flex:1 1 58%}#b{flex:1 1 42%}</style></head>"
+			"<body><div id='h'><div id='a'>A</div><div id='b'>B</div></div></body></html>";
+		const auto first = should_box_of(html, "a");
+		const auto second = should_box_of(html, "b");
+		should::EqualTrue(second.y > first.y, "percentage bases wrap with gap");
+	});
+	t.register_test("Layout: flex item contains child margins", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{display:flex}#c{height:20px;margin:0 0 18px}</style></head>"
+			"<body><div id='h'><div id='i'><div id='c'></div></div></div></body></html>", "i");
+		should::equal(38, box.height, "flex item child bottom margin");
+	});
+	t.register_test("Layout: bordered sibling margins collapse", []
+	{
+		const std::string html =
+			"<html><head><style>#a{height:20px;border-bottom:1px solid;margin-bottom:10px}#b{height:20px;margin-top:16px}</style></head>"
+			"<body><div id='a'>A</div><div id='b'>B</div></body></html>";
+		const auto first = should_box_of(html, "a");
+		const auto second = should_box_of(html, "b");
+		should::equal(37, second.y + 16 - first.y, "bordered sibling margin gap");
+	});
+
+	// An <img> is sized from CSS even before any bitmap arrives.
+	t.register_test("Layout: image honours css size without a bitmap", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#h{width:800px}#t{width:50%;height:60px}</style></head>"
+			"<body><div id='h'><img id='t' src='never.png'></div></body></html>", "t");
+		should::equal(400, box.width, "image width");
+		should::equal(60, box.height, "image height");
+	});
+}
+
+
+std::unique_ptr<element> parser::create_element(const std::string_view tag_name)
 {
 	std::unique_ptr<element> newTag;
 
@@ -868,7 +1516,7 @@ std::unique_ptr<element> parser::create_element(const std::string& tag_name)
 	return newTag;
 }
 
-void parser::parse_tag_start(const std::string& tag_name)
+void parser::parse_tag_start(const std::string_view tag_name)
 {
 	parse_pop_void_element();
 
@@ -898,7 +1546,7 @@ void parser::parse_tag_start(const std::string& tag_name)
 }
 
 
-void parser::parse_tag_end(const std::string& tag_name)
+void parser::parse_tag_end(const std::string_view tag_name)
 {
 	if (!m_parse_stack.empty())
 	{
@@ -928,13 +1576,18 @@ void parser::parse_push_element(std::unique_ptr<element> el)
 {
 	if (!m_parse_stack.empty())
 	{
-		auto raw = el.get();
-		m_parse_stack.back()->append_child(std::move(el));
+		const auto raw = el.get();
+
+		if (auto refused = m_parse_stack.back()->append_child(std::move(el)))
+		{
+			m_detached.push_back(std::move(refused));
+		}
+
 		m_parse_stack.push_back(raw);
 	}
 }
 
-void parser::parse_attribute(const std::string& attr_name, const std::string& attr_value)
+void parser::parse_attribute(const std::string_view attr_name, const std::string_view attr_value)
 {
 	if (!m_parse_stack.empty())
 	{
@@ -942,7 +1595,7 @@ void parser::parse_attribute(const std::string& attr_name, const std::string& at
 	}
 }
 
-void parser::parse_word(const std::string& val)
+void parser::parse_word(const std::string_view val)
 {
 	if (m_parse_stack.empty()) return;
 
@@ -959,7 +1612,7 @@ void parser::parse_word(const std::string& val)
 	}
 }
 
-void parser::parse_space(const std::string& val)
+void parser::parse_space(const std::string_view val)
 {
 	parse_pop_void_element();
 	if (!m_parse_stack.empty())
@@ -990,7 +1643,7 @@ void parser::parse_cdata_end()
 	parse_pop_element();
 }
 
-void parser::parse_data(const std::string& val)
+void parser::parse_data(const std::string_view val)
 {
 	if (!m_parse_stack.empty())
 	{
@@ -1008,7 +1661,7 @@ bool parser::parse_pop_element()
 	return false;
 }
 
-bool parser::parse_pop_element(const std::string& tag, const char* stop_tags)
+bool parser::parse_pop_element(const std::string_view tag, const char* stop_tags)
 {
 	bool found = false;
 	for (auto iel = m_parse_stack.rbegin(); iel != m_parse_stack.rend(); ++iel)
@@ -1045,7 +1698,7 @@ void parser::parse_pop_void_element()
 	}
 }
 
-void parser::parse_pop_to_parent(const std::string& parents, const std::string& stop_parent)
+void parser::parse_pop_to_parent(const char* parents, const char* stop_parent)
 {
 	std::vector<element*>::size_type parent = 0;
 	bool found = false;
@@ -1074,7 +1727,7 @@ void parser::parse_pop_to_parent(const std::string& parents, const std::string& 
 	}
 }
 
-void parser::parse_close_omitted_end(const std::string& tag)
+void parser::parse_close_omitted_end(const std::string_view tag)
 {
 	if (m_parse_stack.empty()) return;
 
@@ -1091,7 +1744,7 @@ void parser::parse_close_omitted_end(const std::string& tag)
 	}
 }
 
-void parser::parse_open_omitted_start(const std::string& tag)
+void parser::parse_open_omitted_start(const std::string_view tag)
 {
 	if (is_equal(tag, "col"))
 	{
@@ -1151,18 +1804,12 @@ void document::load_master_stylesheet(const std::string& text)
 	m_styles.parse_stylesheet(text, empty, *this, media_list);
 }
 
-template <class tstream>
-static void parse_stream(std::shared_ptr<document> doc, tstream& str, parser& par)
+static void parse_stream(html_scanner& sc, parser& par)
 {
-	scanner<tstream> sc(str);
-
-	int t = 0;
-	int token_count = 0;
+	token_type t;
 
 	while ((t = sc.get_token()) != TT_EOF && !par.is_stack_empty())
 	{
-		token_count++;
-
 		switch (t)
 		{
 		case TT_CDATA_START:
@@ -1181,24 +1828,18 @@ static void parse_stream(std::shared_ptr<document> doc, tstream& str, parser& pa
 			par.parse_data(sc.get_value());
 			break;
 		case TT_TAG_START:
+			// Markup declarations we do not model arrive here as "!name".
+			if (!sc.get_tag_name().empty() && sc.get_tag_name().front() != '!')
 			{
-				std::string tmp_str = sc.get_tag_name();
-				if (!tmp_str.empty() && tmp_str[0] != '!')
-				{
-					par.parse_tag_start(trim_lower(tmp_str));
-				}
+				par.parse_tag_start(sc.get_tag_name());
 			}
 			break;
 		case TT_TAG_END_EMPTY:
 		case TT_TAG_END:
-			{
-				par.parse_tag_end(trim_lower(sc.get_tag_name()));
-			}
+			par.parse_tag_end(sc.get_tag_name());
 			break;
 		case TT_ATTR:
-			{
-				par.parse_attribute(trim_lower(sc.get_attr_name()), sc.get_value());
-			}
+			par.parse_attribute(sc.get_attr_name(), sc.get_value());
 			break;
 		case TT_WORD:
 			par.parse_word(sc.get_value());
@@ -1206,38 +1847,31 @@ static void parse_stream(std::shared_ptr<document> doc, tstream& str, parser& pa
 		case TT_SPACE:
 			par.parse_space(sc.get_value());
 			break;
+		default:
+			break;
 		}
 	}
 }
 
-template <class tstream>
-static std::shared_ptr<document> create_from_stream(view_host& view, const std::string& url, tstream& str)
+std::shared_ptr<document> document::create_from_bytes(view_host& view, const std::string& url,
+                                                      const std::string_view bytes,
+                                                      const std::string_view content_type)
 {
 	auto doc = std::make_shared<document>(view);
 
 	doc->set_base_url(url);
-	parser par(*doc);
+	doc->m_source = decode_to_utf8(bytes, content_type);
 
-	parse_stream(doc, str, par);
+	view.diagnostic(std::format("HTML parse started: {} ({} bytes)", url, doc->m_source.size()));
+
+	parser par(*doc);
+	html_scanner sc(doc->m_source);
+	parse_stream(sc, par);
+
+	view.diagnostic("HTML parse completed");
 
 	doc->load_master_stylesheet(load_resource_html(IDR_CSS_MASTER));
 	doc->set_root(par.release_root());
-
-	return doc;
-}
-
-template <class tstream>
-static std::shared_ptr<document> parse_from_stream(view_host& view, const std::string& url, tstream& str)
-{
-	auto doc = std::make_shared<document>(view);
-
-	doc->set_base_url(url);
-	parser par(*doc);
-
-	parse_stream(doc, str, par);
-
-	doc->load_master_stylesheet(load_resource_html(IDR_CSS_MASTER));
-	doc->m_parsed_root = par.release_root();
 
 	return doc;
 }
@@ -1265,8 +1899,14 @@ void document::update_styles(element* root_el)
 
 	if (root_el)
 	{
+		const auto t0 = std::chrono::steady_clock::now();
 		root_el->apply_stylesheet(m_styles);
+		const auto t1 = std::chrono::steady_clock::now();
 		root_el->parse_styles();
+		const auto t2 = std::chrono::steady_clock::now();
+		m_view.diagnostic(std::format("MATCH {} us, PARSE_STYLES {} us",
+		                              std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count(),
+		                              std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count()));
 	}
 }
 
@@ -1282,30 +1922,6 @@ void document::finalize()
 	m_view.layout();
 }
 
-std::shared_ptr<document> document::create_from_utf16(view_host& view, const std::string& url, const std::string& str)
-{
-	default_instream si(str);
-	return create_from_stream(view, url, si);
-}
-
-std::shared_ptr<document> document::create_from_utf8(view_host& view, const std::string& url, const std::string& str)
-{
-	utf8_instream si(str);
-	return create_from_stream(view, url, si);
-}
-
-std::shared_ptr<document> document::parse_from_utf16(view_host& view, const std::string& url, const std::string& str)
-{
-	default_instream si(str);
-	return parse_from_stream(view, url, si);
-}
-
-std::shared_ptr<document> document::parse_from_utf8(view_host& view, const std::string& url, const std::string& str)
-{
-	utf8_instream si(str);
-	return parse_from_stream(view, url, si);
-}
-
 void document::add_stylesheet(const std::string& text, const std::string& baseurl, const std::string& media)
 {
 	auto media_list = media_query_list::create_from_string(media);
@@ -1317,6 +1933,26 @@ void document::apply_stylesheet()
 	update_styles(m_root.get());
 	auto pThis = shared_from_this();
 	dispatch_to_ui([pThis]() { pThis->m_view.layout(); });
+}
+
+// Stylesheets often land in a burst. Restyling per arrival costs a full cascade
+// each time, so fold any that arrive before the queued pass runs into that pass.
+void document::request_restyle()
+{
+	if (m_restyle_pending) return;
+	m_restyle_pending = true;
+
+	auto pThis = shared_from_this();
+	dispatch_to_ui([pThis]()
+	{
+		pThis->m_restyle_pending = false;
+
+		if (pThis->m_root)
+		{
+			pThis->update_styles(pThis->m_root.get());
+		}
+		pThis->m_view.layout();
+	});
 }
 
 pf::font_handle document::add_font(const std::string& name_in, int size, const std::string& weight,
@@ -1336,7 +1972,7 @@ pf::font_handle document::add_font(const std::string& name_in, int size, const s
 		size = get_default_font_size();
 	}
 
-	auto key = std::format("{}:{}:{}:{}:{}", name, size, weight, style, decoration);
+	const auto key = std::format("{}:{}:{}:{}:{}", name, size, weight, style, decoration);
 
 	{
 		std::lock_guard lock(m_fonts_mutex);
@@ -1349,7 +1985,7 @@ pf::font_handle document::add_font(const std::string& name_in, int size, const s
 	}
 
 	{
-		auto fs = static_cast<font_style>(value_index(style, font_style_strings, font_style_normal));
+		const auto fs = static_cast<font_style>(value_index(style, font_style_strings, font_style_normal));
 
 		int fw = value_index(weight, font_weight_strings, -1);
 		if (fw >= 0)
@@ -1366,7 +2002,9 @@ pf::font_handle document::add_font(const std::string& name_in, int size, const s
 				fw = 300;
 				break;
 			default:
-				fw = 400;
+				fw = fw >= font_weight_100
+					     ? (fw - font_weight_100 + 1) * 100
+					     : 400;
 				break;
 			}
 		}
@@ -1383,7 +2021,7 @@ pf::font_handle document::add_font(const std::string& name_in, int size, const s
 
 		if (!decoration.empty())
 		{
-			auto tokens = split_string(decoration);
+			const auto tokens = split_string(decoration);
 
 			for (const auto& tok : tokens)
 			{
@@ -1497,34 +2135,37 @@ element* document::add_body()
 	}
 	auto el = std::make_unique<element>(*this, el_body);
 	el->set_tag_name("body");
-	auto raw = el.get();
+	const auto raw = el.get();
 	m_root->append_child(std::move(el));
 	return raw;
 }
 
-int document::render(render_win32& renderer, const int max_width, const render_type rt)
+int document::render(const int max_width, const render_type rt)
 {
+	const auto started = std::chrono::steady_clock::now();
 	int ret = 0;
 	if (m_root)
 	{
 		if (rt == render_fixed_only)
 		{
 			m_fixed_boxes.clear();
-			m_root->render_positioned(renderer, rt);
+			m_root->render_positioned(rt);
 		}
 		else
 		{
-			ret = m_root->render(renderer, 0, 0, max_width);
+			ret = m_root->render(0, 0, max_width);
 			if (m_root->fetch_positioned())
 			{
 				m_fixed_boxes.clear();
-				m_root->render_positioned(renderer, rt);
+				m_root->render_positioned(rt);
 			}
 			m_size.width = 0;
 			m_size.height = 0;
 			m_root->calc_document_size(m_size);
 		}
 	}
+	m_view.diagnostic(std::format("RENDER {} us", std::chrono::duration_cast<std::chrono::microseconds>(
+		                              std::chrono::steady_clock::now() - started).count()));
 	return ret;
 }
 
@@ -1556,6 +2197,12 @@ int document::cvt_units(css_length& val, const int fontSize, const int size)
 	if (val.is_predefined())
 	{
 		return 0;
+	}
+	if (val.is_calc())
+	{
+		// calc() keeps its own percentage and fixed parts and never sets m_units,
+		// so the switch below would read a value that was never stored.
+		return val.calc_percent(size);
 	}
 	int ret = 0;
 	switch (val.units())
@@ -1619,6 +2266,312 @@ int document::height() const
 {
 	return m_size.height;
 }
+
+// Walks the laid-out tree and reports structure plus geometry that no correct
+// layout should produce. Uses box geometry only, so it needs no window and is
+// reproducible whenever the layout is.
+layout_stats document::analyse_layout(std::vector<std::string>* samples) const
+{
+	layout_stats st;
+	if (!m_root) return st;
+
+	constexpr int max_samples = 12;
+	const int viewport = m_client_pos.width;
+
+	const auto note = [&](const std::string& what, const element* el, const int x, const int y)
+	{
+		if (!samples || static_cast<int>(samples->size()) >= max_samples) return;
+		samples->push_back(std::format("{}: <{} id='{}' class='{}'> x={} y={} {}x{} display={}",
+		                               what, el->get_tag_name(), el->get_attr("id"), el->get_attr("class"),
+		                               x, y, el->width(), el->height(),
+		                               el->get_style_property(prop_id::display, false)));
+	};
+
+	std::function<void(const element*, int, int, int, bool)> visit =
+		[&](const element* el, const int parent_x, const int parent_y, const int depth, const bool ancestors_visible)
+	{
+		const int x = parent_x + el->left();
+		const int y = parent_y + el->top();
+
+		st.max_depth = std::max(st.max_depth, depth);
+
+		// Geometry inside a hidden subtree is never painted, so judging it
+		// produces only false positives.
+		const bool visible = ancestors_visible && el->is_visible();
+
+		if (ancestors_visible && !visible) ++st.hidden_subtrees;
+
+		if (el->is_text_node())
+		{
+			++st.text_nodes;
+
+			if (visible && el->width() > 0 && el->height() <= 0 &&
+				!el->is_break() && ++st.zero_area_text <= max_samples)
+			{
+				note("zero-height text", el, x, y);
+			}
+
+			if (visible)
+			{
+				const int right = x + el->width();
+				st.right_edge = std::max(st.right_edge, right);
+				const bool parent_is_root = el->parent() && !el->parent()->parent();
+				const bool parent_fits = parent_is_root ||
+					parent_x + (el->parent() ? el->parent()->width() : 0) <= viewport;
+
+				if (right > viewport && parent_fits)
+				{
+					++st.overflow_x;
+					note("overflows viewport", el, x, y);
+				}
+
+				if (x < 0 && parent_x >= 0)
+				{
+					++st.negative_x;
+					note("starts left of origin", el, x, y);
+				}
+			}
+		}
+		else
+		{
+			++st.elements;
+
+			if (el->get_tag_name() == "img")
+			{
+				++st.images;
+				// Only width is judged: height comes from the bitmap's aspect
+				// ratio, and headless runs never receive one.
+				if (visible && el->width() <= 0)
+				{
+					++st.unsized_image;
+					note("unsized image", el, x, y);
+				}
+			}
+
+			if (visible)
+			{
+				const int right = x + el->width();
+				if (el->parent()) st.right_edge = std::max(st.right_edge, right);
+
+				if (el->width() < 0 || el->height() < 0)
+				{
+					++st.negative_size;
+					note("negative size", el, x, y);
+				}
+
+				// Only report the outermost offender: a wide ancestor makes
+				// every descendant overflow too, which buries the cause.
+				const bool parent_is_root = el->parent() && !el->parent()->parent();
+				const bool parent_fits = parent_is_root ||
+					parent_x + (el->parent() ? el->parent()->width() : 0) <= viewport;
+
+				if (el->parent() && right > viewport && parent_fits)
+				{
+					++st.overflow_x;
+					note("overflows viewport", el, x, y);
+				}
+
+				if (x < 0 && parent_x >= 0)
+				{
+					++st.negative_x;
+					note("starts left of origin", el, x, y);
+				}
+			}
+		}
+
+		const int content_x = x + el->content_margins_left();
+		const int content_y = y + el->content_margins_top();
+		for (size_t i = 0; i < el->get_children_count(); ++i)
+			visit(el->get_child(static_cast<int>(i)), content_x, content_y, depth + 1, visible);
+	};
+
+	visit(m_root.get(), 0, 0, 0, true);
+	return st;
+}
+
+// Indented box tree in document coordinates. Whitespace-only text is skipped
+// because it carries no geometry worth reading.
+std::vector<std::string> document::dump_boxes(const int max_depth) const
+{
+	std::vector<std::string> lines;
+	if (!m_root) return lines;
+
+	std::function<void(const element*, int, int, int)> visit =
+		[&](const element* el, const int parent_x, const int parent_y, const int depth)
+	{
+		const int x = parent_x + el->left();
+		const int y = parent_y + el->top();
+
+		if (depth <= max_depth)
+		{
+			const auto text = el->is_text_node() ? el->get_text() : std::string();
+			const bool blank = el->is_text_node() && text.find_first_not_of(" \t\r\n") == std::string::npos;
+
+			if (!blank)
+			{
+				std::string label;
+
+				if (el->is_text_node())
+				{
+					auto t = text.substr(0, 40);
+					std::replace(t.begin(), t.end(), '\n', ' ');
+					label = std::format("\"{}\"", t);
+				}
+				else
+				{
+					label = "<" + el->get_tag_name();
+					const auto id = el->get_attr("id");
+					const auto cls = el->get_attr("class");
+					if (!id.empty()) label += std::format(" id={}", id);
+					if (!cls.empty()) label += std::format(" class={}", cls.substr(0, 40));
+					label += ">";
+				}
+
+				lines.push_back(std::format("{}{} [{},{} {}x{}] {}",
+				                            std::string(depth * 2, ' '), label, x, y,
+				                            el->width(), el->height(),
+				                            el->is_text_node()
+					                            ? std::string()
+					                            : el->get_style_property(prop_id::display, false)));
+			}
+		}
+
+		const int content_x = x + el->content_margins_left();
+		const int content_y = y + el->content_margins_top();
+		for (size_t i = 0; i < el->get_children_count(); ++i)
+			visit(el->get_child(static_cast<int>(i)), content_x, content_y, depth + 1);
+	};
+
+	visit(m_root.get(), 0, 0, 0);
+	return lines;
+}
+
+namespace
+{
+	void append_json_string(std::string& out, const std::string_view value)
+	{
+		out.push_back('"');
+		for (const unsigned char c : value)
+		{
+			switch (c)
+			{
+			case '"': out += "\\\""; break;
+			case '\\': out += "\\\\"; break;
+			case '\b': out += "\\b"; break;
+			case '\f': out += "\\f"; break;
+			case '\n': out += "\\n"; break;
+			case '\r': out += "\\r"; break;
+			case '\t': out += "\\t"; break;
+			default:
+				if (c < 0x20) out += std::format("\\u{:04x}", c);
+				else out.push_back(static_cast<char>(c));
+				break;
+			}
+		}
+		out.push_back('"');
+	}
+
+	std::string_view indexed_value(const std::string_view values, const int index)
+	{
+		size_t start = 0;
+		for (int current = 0; current < index; ++current)
+		{
+			start = values.find(';', start);
+			if (start == std::string_view::npos) return {};
+			++start;
+		}
+		const auto end = values.find(';', start);
+		return values.substr(start, end == std::string_view::npos ? end : end - start);
+	}
+
+	void append_edges(std::string& out, const margins& edges)
+	{
+		out += std::format("{{\"top\":{},\"right\":{},\"bottom\":{},\"left\":{}}}",
+		                   edges.top, edges.right, edges.bottom, edges.left);
+	}
+}
+
+std::string document::dump_layout_json() const
+{
+	std::string out = std::format(
+		"{{\"source\":\"potato\",\"viewport\":{{\"width\":{},\"height\":{},"
+		"\"devicePixelRatio\":1,\"scrollX\":0,\"scrollY\":0}},"
+		"\"document\":{{\"width\":{},\"height\":{}}},\"probes\":[",
+		m_client_pos.width, m_client_pos.height, width(), height());
+	bool first = true;
+
+	std::function<void(const element*, int, int)> visit =
+		[&](const element* el, const int parent_x, const int parent_y)
+	{
+		const int outer_x = parent_x + el->left();
+		const int outer_y = parent_y + el->top();
+		const auto key = el->get_attr("data-probe");
+
+		if (!key.empty())
+		{
+			if (!first) out.push_back(',');
+			first = false;
+			out += "{\"key\":";
+			append_json_string(out, key);
+			out += ",\"tag\":";
+			append_json_string(out, el->get_tag_name());
+			out += std::format(
+				",\"rect\":{{\"x\":{},\"y\":{},\"width\":{},\"height\":{}}},\"display\":" ,
+				outer_x + el->margin_left(), outer_y + el->margin_top(),
+				el->width() - el->margin_left() - el->margin_right(),
+				el->height() - el->margin_top() - el->margin_bottom());
+			append_json_string(out, indexed_value(style_display_strings, static_cast<int>(el->get_display())));
+			out += ",\"position\":";
+			append_json_string(out, indexed_value(element_position_strings,
+			                                      static_cast<int>(el->get_element_position())));
+			out += ",\"boxSizing\":";
+			append_json_string(out, el->get_style_property(prop_id::box_sizing, false, "content-box"));
+			out += ",\"overflowX\":";
+			append_json_string(out, indexed_value(overflow_strings, static_cast<int>(el->get_overflow())));
+			out += ",\"overflowY\":";
+			append_json_string(out, indexed_value(overflow_strings, static_cast<int>(el->get_overflow())));
+			out += ",\"margin\":";
+			append_edges(out, el->get_margins());
+			out += ",\"padding\":";
+			append_edges(out, el->get_paddings());
+			out += ",\"border\":";
+			append_edges(out, el->get_borders());
+			out += ",\"fontFamily\":";
+			append_json_string(out, el->get_style_property(prop_id::font_family, true));
+			out += std::format(",\"fontSize\":{},\"lineHeight\":{}}}",
+			                   el->get_font_size(), el->line_height());
+		}
+
+		const int content_x = outer_x + el->content_margins_left();
+		const int content_y = outer_y + el->content_margins_top();
+		for (size_t i = 0; i < el->get_children_count(); ++i)
+			visit(el->get_child(static_cast<int>(i)), content_x, content_y);
+	};
+
+	if (m_root) visit(m_root.get(), 0, 0);
+	out += "]}";
+	return out;
+}
+
+void document::diagnose_layout() const
+{
+	std::vector<std::string> samples;
+	const auto st = analyse_layout(&samples);
+
+	m_view.diagnostic(std::format(
+		"Nodes: {} elements, {} text, {} images, depth {}; right edge {} (viewport {})",
+		st.elements, st.text_nodes, st.images, st.max_depth, st.right_edge, m_client_pos.width));
+
+	if (st.overflow_x || st.negative_x || st.zero_area_text || st.unsized_image || st.negative_size)
+	{
+		m_view.diagnostic(std::format(
+			"Anomalies: {} overflow-x, {} negative-x, {} zero-height-text, {} unsized-image, {} negative-size",
+			st.overflow_x, st.negative_x, st.zero_area_text, st.unsized_image, st.negative_size));
+
+		for (const auto& s : samples) m_view.diagnostic("  " + s);
+	}
+}
+
 
 bool document::on_mouse_over(const int x, const int y, const int client_x, const int client_y,
                              position::vector& redraw_boxes)
@@ -1738,7 +2691,7 @@ bool document::on_lbutton_down(const int x, const int y, const int client_x, con
 
 bool document::on_lbutton_up(int x, int y, int client_x, int client_y, position::vector& redraw_boxes)
 {
-	auto root = m_root;
+	const auto root = m_root;
 	if (!root)
 	{
 		return false;
@@ -1811,9 +2764,15 @@ void document::set_base_url(const std::string& base_url)
 {
 	if (!base_url.empty())
 	{
-		// pf::resolve_url returns base_url unchanged when it is already absolute,
-		// otherwise resolves it against m_url.
-		m_base_path = pf::resolve_url(m_url, base_url);
+		if (m_url.empty())
+		{
+			m_url = base_url;
+			m_base_path = base_url;
+		}
+		else
+		{
+			m_base_path = pf::resolve_url(m_url, base_url);
+		}
 	}
 	else
 	{
@@ -1827,10 +2786,10 @@ void document::link(const element* el)
 
 	if (rel == "stylesheet")
 	{
-		const auto& href = el->get_attr("href");
+		const std::string href(el->get_attr("href"));
 		if (href.empty()) return;
 
-		const auto media = el->get_attr("media", "all");
+		const std::string media(el->get_attr("media", "all"));
 		// Trigger an asynchronous CSS download. import_css already handles base path
 		// resolution, parsing, and applying the rules to the live DOM.
 		import_css(href, m_base_path, media);
@@ -1848,34 +2807,43 @@ void document::import_css(const std::string& url, const std::string& baseurl, co
 
 	auto css_url = make_url(url, base_path);
 	auto pThis = shared_from_this();
+	m_view.resource_started("stylesheet", css_url);
 
 	m_http.download_file(css_url, std::make_shared<http_request>(
 		                     [pThis, css_url, media](const std::string& file_name, const uint32_t error,
 		                                             const uint32_t httpStatus,
 		                                             const std::string& /*reqUrl*/)
 		                     {
-			                     if (error || httpStatus >= 400) return;
-			                     const auto css_text = get_file_contents(file_name);
-			                     if (css_text.empty()) return;
-
-			                     // Stylesheet parsing and selector sort can be slow; do them on the
-			                     // background thread, then apply on the UI thread once.
-			                     dispatch_async([pThis, css_url, css_text, media]()
+			                     if (error || httpStatus >= 400)
 			                     {
+				                     pThis->m_view.resource_finished("stylesheet", css_url, false);
+				                     return;
+			                     }
+			                     const auto css_text = get_file_contents(file_name);
+			                     if (css_text.empty())
+			                     {
+				                     pThis->m_view.resource_finished("stylesheet", css_url, false);
+				                     return;
+			                     }
+			                     pThis->m_view.diagnostic(std::format(
+				                     "Stylesheet downloaded: {} bytes, HTTP {}: {}",
+				                     css_text.size(), httpStatus, css_url));
+
+			                     dispatch_to_ui([pThis, css_url, css_text, media]()
+			                     {
+				                     const auto selectors_before = pThis->m_styles.selectors().size();
 				                     pThis->add_stylesheet(css_text, css_url, media);
 				                     pThis->m_styles.sort_selectors();
+				                     pThis->m_view.diagnostic(std::format(
+					                     "Stylesheet parsed: {} selectors added, {} total: {}",
+					                     pThis->m_styles.selectors().size() - selectors_before,
+					                     pThis->m_styles.selectors().size(), css_url));
 
-				                     dispatch_to_ui([pThis]()
+				                     if (pThis->m_root)
 				                     {
-					                     if (pThis->m_root)
-					                     {
-						                     pThis->m_root->apply_stylesheet(pThis->m_styles);
-						                     pThis->m_root->parse_styles();
-					                     }
-					                     // Defer layout: just invalidate. The next paint or
-					                     // window event will trigger layout if needed.
-					                     pThis->m_view.invalidate();
-				                     });
+					                     pThis->request_restyle();
+				                     }
+				                     pThis->m_view.resource_finished("stylesheet", css_url, true);
 			                     });
 		                     }));
 }
@@ -1894,12 +2862,13 @@ void document::set_cursor(const std::string& cursor)
 
 void document::load_image(const std::string& url, const std::string& base)
 {
-	auto image_url = make_url(url, base);
+	auto image_url = make_url(url, base.empty() ? m_base_path : base);
 	auto pThis = shared_from_this();
 
 	if (!m_images.contains(image_url))
 	{
 		m_images[image_url] = nullptr; // Indicate loading
+		m_view.resource_started("image", image_url);
 
 		m_http.download_file(image_url, std::make_shared<http_request>(
 			                     [pThis, image_url](const std::string& file_name, const uint32_t error,
@@ -1907,32 +2876,43 @@ void document::load_image(const std::string& url, const std::string& base)
 			                     {
 				                     if (error || httpStatus >= 400)
 				                     {
+					                     pThis->m_view.resource_finished("image", image_url, false);
 					                     return;
 				                     }
-				                     pThis->m_images[image_url] = pf::load_bitmap_file(pf::file_path(file_name));
-				                     // Re-layout only if the image differs in size from the placeholder; for
-				                     // simplicity request layout once per page-load tick by invalidating. Many
-				                     // pages (e.g. Wikipedia) have hundreds of images and a full re-layout per
-				                     // image effectively starves the UI thread.
-				                     pThis->m_view.invalidate();
+				                     auto image = pf::load_bitmap_file(pf::file_path(file_name));
+				                     if (!image)
+				                     {
+					                     image = create_svg_placeholder(get_file_contents(file_name));
+					                     if (image)
+					                     {
+						                     pThis->m_view.diagnostic(std::format(
+							                     "SVG placeholder: {}x{}: {}", image->width, image->height,
+							                     image_url));
+					                     }
+				                     }
+				                     pThis->m_images[image_url] = std::move(image);
+				                     pThis->m_view.resource_finished(
+					                     "image", image_url, pThis->m_images[image_url] != nullptr);
+				                     pThis->m_view.layout();
 			                     }));
 	}
 }
 
 pf::bitmap_ptr document::find_image(const std::string& url)
 {
-	const auto found = m_images.find(url);
-	return found != m_images.end() ? found->second : nullptr;
+	return find_image(url, m_base_path);
 }
 
 pf::bitmap_ptr document::find_image(const std::string& url, const std::string& base)
 {
-	return find_image(make_url(url, base));
+	const auto image_url = make_url(url, base.empty() ? m_base_path : base);
+	const auto found = m_images.find(image_url);
+	return found != m_images.end() ? found->second : nullptr;
 }
 
 bool document::is_image_cached(const std::string& src, const std::string& baseurl)
 {
-	const auto url = make_url(src, baseurl);
+	const auto url = make_url(src, baseurl.empty() ? m_base_path : baseurl);
 	return m_images.contains(url);
 }
 
@@ -1942,7 +2922,7 @@ void document::delete_font(const pf::font_handle hFont)
 	pf::delete_font_handle(hFont);
 }
 
-int document::text_width(const std::string& text, const pf::font_handle hFont)
+int document::text_width(const std::string_view text, const pf::font_handle hFont)
 {
 	return pf::measure_text_with_font(hFont, text).cx;
 }

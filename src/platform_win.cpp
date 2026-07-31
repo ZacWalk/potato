@@ -1,4 +1,4 @@
-﻿// platform_win.cpp â€” Win32 platform layer: entry point, windowing, timers,
+// platform_win.cpp â€” Win32 platform layer: entry point, windowing, timers,
 // resources, menus, device context, file dialogs, and spell checking
 
 #include "platform.h"
@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
-#include <cstring>
 #include <deque>
 #include <format>
 #include <fstream>
@@ -38,14 +37,7 @@
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shlwapi.lib")
 
-#include <functional>
-#include <map>
-#include <vector>
-#include <string>
 #include <optional>
-
-#include "platform.h"
-#include "resource.h"
 
 using namespace std::string_view_literals;
 
@@ -54,7 +46,7 @@ inline RECT& as_rect(pf::irect& r) { return reinterpret_cast<RECT&>(r); }
 inline const RECT& as_rect(const pf::irect& r) { return reinterpret_cast<const RECT&>(r); }
 
 // Shared clipboard helpers used by both win_impl and the free pf:: functions.
-static std::string clipboard_get_text(HWND owner)
+static std::string clipboard_get_text(const HWND owner)
 {
 	std::string result;
 	if (!OpenClipboard(owner)) return result;
@@ -72,7 +64,7 @@ static std::string clipboard_get_text(HWND owner)
 	return result;
 }
 
-static bool clipboard_set_text(HWND owner, std::string_view text)
+static bool clipboard_set_text(const HWND owner, const std::string_view text)
 {
 	if (!OpenClipboard(owner)) return false;
 	bool success = false;
@@ -419,7 +411,8 @@ class win_draw_context final : public pf::draw_context
 	}
 
 public:
-	explicit win_draw_context(const HDC hdc, const pf::irect& clip) : _hdc(hdc), _clip(clip)
+	explicit win_draw_context(const HDC hdc, const pf::irect& clip)
+		: _hdc(hdc), _clip(clip)
 	{
 		_orig_text_color = _text_color = GetTextColor(_hdc);
 		_orig_bk_color = _bk_color = GetBkColor(_hdc);
@@ -1524,6 +1517,52 @@ std::string pf::format_key_binding(const key_binding& kb)
 
 //  Font handles, native DC wrapper, URL resolver 
 
+// A screen-compatible DC kept alive per thread. Acquiring a DC and realizing a
+// font dominated text measurement, which runs once per text node per style pass.
+struct measure_dc
+{
+	HDC hdc = CreateCompatibleDC(nullptr);
+	HFONT original = nullptr;
+	HFONT current = nullptr;
+	std::wstring buffer;
+
+	~measure_dc()
+	{
+		if (hdc)
+		{
+			if (original) SelectObject(hdc, original);
+			DeleteDC(hdc);
+		}
+	}
+
+	HDC with_font(const HFONT f)
+	{
+		if (!hdc) return nullptr;
+		if (f != current)
+		{
+			const auto prev = static_cast<HFONT>(SelectObject(hdc, f));
+			if (!original) original = prev;
+			current = f;
+		}
+		return hdc;
+	}
+
+	void release_font(const HFONT f)
+	{
+		if (hdc && f == current)
+		{
+			SelectObject(hdc, original);
+			current = nullptr;
+		}
+	}
+};
+
+static measure_dc& shared_measure_dc()
+{
+	thread_local measure_dc instance;
+	return instance;
+}
+
 pf::font_handle pf::create_font_handle(const font_def& def, font_metrics_data* out_metrics)
 {
 	const auto wface = utf8_to_utf16(def.face);
@@ -1563,34 +1602,22 @@ pf::font_handle pf::create_font_handle(const font_def& def, font_metrics_data* o
 
 void pf::delete_font_handle(const font_handle h)
 {
-	if (h) DeleteObject(std::bit_cast<HFONT>(h));
+	if (!h) return;
+	// GDI refuses to delete a font that is still selected into a DC.
+	shared_measure_dc().release_font(std::bit_cast<HFONT>(h));
+	DeleteObject(std::bit_cast<HFONT>(h));
 }
 
 pf::isize pf::measure_text_with_font(const font_handle h, const std::string_view text)
 {
 	if (!h) return {0, 0};
-	const HDC hdc = GetDC(nullptr);
+	auto& m = shared_measure_dc();
+	const HDC hdc = m.with_font(std::bit_cast<HFONT>(h));
 	if (!hdc) return {0, 0};
-	const auto old = static_cast<HFONT>(SelectObject(hdc, std::bit_cast<HFONT>(h)));
-	const auto wtext = utf8_to_utf16(text);
+	utf8_to_utf16(text, m.buffer);
 	SIZE sz = {0, 0};
-	GetTextExtentPoint32W(hdc, wtext.c_str(), static_cast<int>(wtext.size()), &sz);
-	SelectObject(hdc, old);
-	ReleaseDC(nullptr, hdc);
+	GetTextExtentPoint32W(hdc, m.buffer.c_str(), static_cast<int>(m.buffer.size()), &sz);
 	return {sz.cx, sz.cy};
-}
-
-int pf::line_height_for_font(const font_handle h)
-{
-	if (!h) return 0;
-	const HDC hdc = GetDC(nullptr);
-	if (!hdc) return 0;
-	const auto old = static_cast<HFONT>(SelectObject(hdc, std::bit_cast<HFONT>(h)));
-	TEXTMETRICW tm = {};
-	GetTextMetricsW(hdc, &tm);
-	SelectObject(hdc, old);
-	ReleaseDC(nullptr, hdc);
-	return tm.tmHeight;
 }
 
 std::unique_ptr<pf::draw_context> pf::wrap_native_dc(const uintptr_t native_dc, const irect& clip)
@@ -1634,6 +1661,72 @@ std::string pf::resolve_url(const std::string_view base, const std::string_view 
 	if (result.starts_with("file://"))
 		result.erase(0, 7);
 	return result;
+}
+
+uint32_t pf::charset_to_codepage(const std::string_view charset)
+{
+	struct entry
+	{
+		const char* name;
+		uint32_t cp;
+	};
+
+	// Only the labels that actually show up on the web. Anything absent is
+	// treated as UTF-8 by the caller.
+	static constexpr entry table[] = {
+		{"utf-8", CP_UTF8}, {"utf8", CP_UTF8}, {"us-ascii", CP_UTF8}, {"ascii", CP_UTF8},
+		{"iso-8859-1", 28591}, {"latin1", 28591}, {"l1", 28591}, {"iso8859-1", 28591},
+		{"windows-1250", 1250}, {"windows-1251", 1251}, {"windows-1252", 1252},
+		{"windows-1253", 1253}, {"windows-1254", 1254}, {"windows-1255", 1255},
+		{"windows-1256", 1256}, {"windows-1257", 1257}, {"windows-1258", 1258},
+		{"cp1250", 1250}, {"cp1251", 1251}, {"cp1252", 1252},
+		{"iso-8859-2", 28592}, {"iso-8859-3", 28593}, {"iso-8859-4", 28594},
+		{"iso-8859-5", 28595}, {"iso-8859-6", 28596}, {"iso-8859-7", 28597},
+		{"iso-8859-8", 28598}, {"iso-8859-9", 28599}, {"iso-8859-13", 28603},
+		{"iso-8859-15", 28605},
+		{"koi8-r", 20866}, {"koi8-u", 21866},
+		{"shift_jis", 932}, {"shift-jis", 932}, {"sjis", 932}, {"ms_kanji", 932},
+		{"euc-jp", 20932}, {"iso-2022-jp", 50220},
+		{"gb2312", 936}, {"gbk", 936}, {"gb18030", 54936}, {"big5", 950},
+		{"euc-kr", 949}, {"ks_c_5601-1987", 949},
+		{"windows-874", 874}, {"tis-620", 874},
+	};
+
+	for (const auto& [name, cp] : table)
+	{
+		if (icmp(charset, name) == 0) return cp;
+	}
+	return 0;
+}
+
+std::string pf::transcode_to_utf8(const std::string_view bytes, const uint32_t codepage)
+{
+	if (codepage == 0 || codepage == CP_UTF8 || bytes.empty())
+		return std::string(bytes);
+
+	// MultiByteToWideChar rejects the UTF-16 code pages, so reinterpret those.
+	if (codepage == 1200 || codepage == 1201)
+	{
+		const size_t units = bytes.size() / 2;
+		std::wstring wide(units, L'\0');
+
+		for (size_t i = 0; i < units; ++i)
+		{
+			const auto lo = static_cast<uint8_t>(bytes[i * 2]);
+			const auto hi = static_cast<uint8_t>(bytes[i * 2 + 1]);
+			wide[i] = static_cast<wchar_t>(codepage == 1200 ? lo | hi << 8 : hi | lo << 8);
+		}
+
+		return utf16_to_utf8(wide);
+	}
+
+	const auto len = static_cast<int>(bytes.size());
+	const int wide_len = MultiByteToWideChar(codepage, 0, bytes.data(), len, nullptr, 0);
+	if (wide_len <= 0) return std::string(bytes);
+
+	std::wstring wide(wide_len, L'\0');
+	MultiByteToWideChar(codepage, 0, bytes.data(), len, wide.data(), wide_len);
+	return utf16_to_utf8(wide);
 }
 
 //  Cursor position (global) â”€
@@ -1820,6 +1913,16 @@ namespace
 			FILE* dummy = nullptr;
 			_wfreopen_s(&dummy, L"CONOUT$", L"w", stdout);
 			_wfreopen_s(&dummy, L"CONOUT$", L"w", stderr);
+
+			// AttachConsole leaves the std handles null, which would send every
+			// write down write_stdout's fallback path.
+			const auto out = CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+			                             nullptr, OPEN_EXISTING, 0, nullptr);
+			if (out != INVALID_HANDLE_VALUE)
+			{
+				SetStdHandle(STD_OUTPUT_HANDLE, out);
+				SetStdHandle(STD_ERROR_HANDLE, out);
+			}
 		}
 	}
 }
@@ -2647,7 +2750,18 @@ INT WINAPI WinMain(const HINSTANCE hInstance, HINSTANCE, LPSTR, const int nCmdSh
 	if (g_hMenu)
 		SetMenu(g_hWnd, g_hMenu);
 
-	ShowWindow(g_hWnd, g_nCmdShow);
+	if (init_result.offscreen_gui)
+	{
+		// Park it far outside any monitor so it still paints and lays out, but
+		// never appears and never takes focus.
+		SetWindowPos(g_hWnd, HWND_BOTTOM, -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+		ShowWindow(g_hWnd, SW_SHOWNOACTIVATE);
+	}
+	else
+	{
+		ShowWindow(g_hWnd, g_nCmdShow);
+	}
+
 	UpdateWindow(g_hWnd);
 
 	const int result = pf::platform_run();
@@ -3534,7 +3648,7 @@ namespace
 
 		// Begin the request. Caller must hold a shared_ptr to *this so we can
 		// store the keep-alive copy.
-		bool start(HINTERNET session, const std::string& url, pf::async_http_callbacks cb)
+		bool start(const HINTERNET session, const std::string& url, pf::async_http_callbacks cb)
 		{
 			_cb = std::move(cb);
 
@@ -3551,10 +3665,10 @@ namespace
 				return false;
 			}
 
-			std::wstring host(uc.lpszHostName, uc.dwHostNameLength);
-			std::wstring path(uc.lpszUrlPath, uc.dwUrlPathLength + uc.dwExtraInfoLength);
+			const std::wstring host(uc.lpszHostName, uc.dwHostNameLength);
+			const std::wstring path(uc.lpszUrlPath, uc.dwUrlPathLength + uc.dwExtraInfoLength);
 
-			HINTERNET connect = WinHttpConnect(session, host.c_str(), uc.nPort, 0);
+			const HINTERNET connect = WinHttpConnect(session, host.c_str(), uc.nPort, 0);
 			if (!connect)
 			{
 				fail(std::format("connect failed (err {})", GetLastError()));
@@ -3576,9 +3690,9 @@ namespace
 					_wcsnicmp(uc.lpszScheme, L"https", 5) == 0);
 			DWORD flags = 0;
 			if (is_https) flags |= WINHTTP_FLAG_SECURE;
-			HINTERNET request = WinHttpOpenRequest(connect, L"GET", path.c_str(),
-			                                       nullptr, nullptr,
-			                                       nullptr, flags);
+			const HINTERNET request = WinHttpOpenRequest(connect, L"GET", path.c_str(),
+			                                             nullptr, nullptr,
+			                                             nullptr, flags);
 			if (!request)
 			{
 				const auto err = GetLastError();
@@ -3747,7 +3861,7 @@ namespace
 
 		static void CALLBACK s_callback(HINTERNET, const DWORD_PTR ctx,
 		                                const DWORD status,
-		                                LPVOID info, const DWORD info_len)
+		                                const LPVOID info, const DWORD info_len)
 		{
 			if (ctx == 0) return;
 			auto* self = reinterpret_cast<win_async_http_request*>(ctx);
@@ -3879,7 +3993,7 @@ namespace
 				snapshot.swap(_requests);
 			}
 			for (auto& w : snapshot)
-				if (auto p = w.lock()) p->cancel();
+				if (const auto p = w.lock()) p->cancel();
 		}
 	};
 }
@@ -3979,18 +4093,18 @@ namespace
 		bool _committed = false;
 
 		// reactor that forwards Win32 messages (paint/mouse) to us.
-		struct reactor : pf::frame_reactor
+		struct reactor final : pf::frame_reactor
 		{
 			win_address_bar* owner = nullptr;
 
-			uint32_t handle_message(pf::window_frame_ptr, pf::message_type m,
+			uint32_t handle_message(pf::window_frame_ptr, const pf::message_type m,
 			                        uintptr_t, intptr_t) override
 			{
 				if (m == pf::message_type::erase_background) return 1;
 				return 0;
 			}
 
-			uint32_t handle_mouse(pf::window_frame_ptr, pf::mouse_message_type m,
+			uint32_t handle_mouse(pf::window_frame_ptr, const pf::mouse_message_type m,
 			                      const pf::mouse_params& p) override
 			{
 				if (!owner) return 0;
@@ -4030,8 +4144,8 @@ namespace
 		win_address_bar(std::shared_ptr<win_impl> frame, pf::address_bar_config cfg)
 			: _frame(std::move(frame)), _cfg(std::move(cfg))
 		{
-			for (auto& b : _cfg.left_buttons) _left.push_back({b, {}});
-			for (auto& b : _cfg.right_buttons) _right.push_back({b, {}});
+			for (const auto& b : _cfg.left_buttons) _left.push_back({b, {}});
+			for (const auto& b : _cfg.right_buttons) _right.push_back({b, {}});
 		}
 
 		void initialise()
@@ -4203,8 +4317,8 @@ namespace
 				int text_h = dpi_scale(k_address_edit_fallback_height); // sensible fallback
 				if (_edit_font)
 				{
-					HDC hdc = GetDC(_edit);
-					auto old = static_cast<HFONT>(SelectObject(hdc, _edit_font));
+					const HDC hdc = GetDC(_edit);
+					const auto old = static_cast<HFONT>(SelectObject(hdc, _edit_font));
 					TEXTMETRICW tm{};
 					GetTextMetricsW(hdc, &tm);
 					SelectObject(hdc, old);
@@ -4314,7 +4428,7 @@ namespace
 
 		void on_left_down(const pf::ipoint pt)
 		{
-			for (auto* group : {&_left, &_right})
+			for (const auto* group : {&_left, &_right})
 				for (auto& b : *group)
 				{
 					if (!b.bounds.contains(pt)) continue;
@@ -4339,7 +4453,7 @@ namespace
 		// Subclass proc on the EDIT control: drives the suggestions popup
 		// (Enter / Escape / arrows / text changes) and forwards everything
 		// else to the standard EDIT proc.
-		static LRESULT CALLBACK s_edit_proc(HWND h, UINT m, WPARAM w, LPARAM l)
+		static LRESULT CALLBACK s_edit_proc(const HWND h, const UINT m, const WPARAM w, const LPARAM l)
 		{
 			auto* self = reinterpret_cast<win_address_bar*>(GetWindowLongPtrW(h, GWLP_USERDATA));
 			if (!self || !self->_edit_orig_proc)
@@ -4360,7 +4474,7 @@ namespace
 					self->hide_suggestions();
 					if (self->_frame)
 					{
-						HWND hp = GetParent(self->_frame->m_hWnd);
+						const HWND hp = GetParent(self->_frame->m_hWnd);
 						if (hp) SetFocus(hp);
 					}
 					return 0;
@@ -4436,7 +4550,7 @@ namespace
 		// WM_CTLCOLOREDIT so the EDIT's own background paint matches the
 		// pale-gray rect we draw behind it. Everything else falls through
 		// to the toolbar's normal reactor-based WndProc.
-		static LRESULT CALLBACK s_parent_proc(HWND h, UINT m, WPARAM w, LPARAM l)
+		static LRESULT CALLBACK s_parent_proc(const HWND h, const UINT m, const WPARAM w, const LPARAM l)
 		{
 			auto* self = reinterpret_cast<win_address_bar*>(GetPropW(h, k_address_bar_prop));
 			if (self && self->_parent_orig_proc)
@@ -4560,7 +4674,7 @@ namespace
 			// trailing key events don't re-open the suggestions popup).
 			if (_frame)
 			{
-				HWND hp = GetParent(_frame->m_hWnd);
+				const HWND hp = GetParent(_frame->m_hWnd);
 				if (hp) SetFocus(hp);
 			}
 			if (_cfg.on_navigate) _cfg.on_navigate(url);
@@ -4680,7 +4794,7 @@ namespace
 			registered = true;
 		}
 
-		static LRESULT CALLBACK s_popup_proc(HWND h, UINT m, WPARAM w, LPARAM l)
+		static LRESULT CALLBACK s_popup_proc(const HWND h, const UINT m, const WPARAM w, const LPARAM l)
 		{
 			auto* self = reinterpret_cast<win_address_bar*>(GetWindowLongPtrW(h, GWLP_USERDATA));
 
