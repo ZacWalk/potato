@@ -1,0 +1,23 @@
+{
+    "version": 4,
+    "configurations": [
+        {
+            "name": "MSVC x64",
+            "includePath": [
+                "${workspaceFolder}/src",
+                "${workspaceFolder}/gumbo"
+            ],
+            "defines": [
+                "WIN32",
+                "NDEBUG",
+                "_WINDOWS",
+                "_WINSOCK_DEPRECATED_NO_WARNINGS",
+                "_UNICODE",
+                "UNICODE"
+            ],
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "windows-msvc-x64"
+        }
+    ]
+}

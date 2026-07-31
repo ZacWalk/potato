@@ -36,6 +36,18 @@ public:
 	virtual void layout() = 0;
 	virtual void invalidate() = 0;
 	virtual void open(const std::string& url) = 0;
+
+	virtual void diagnostic(const std::string&)
+	{
+	}
+
+	virtual void resource_started(const std::string&, const std::string&)
+	{
+	}
+
+	virtual void resource_finished(const std::string&, const std::string&, bool)
+	{
+	}
 };
 
 // UI thread dispatch. Implementations live in main.cpp and forward to the
@@ -1366,6 +1378,12 @@ inline bool is_equal(const std::string& l, const std::string& r)
 	return is_equal(l.c_str(), r.c_str());
 }
 
+inline bool is_equal(const std::string_view l, const std::string_view r)
+{
+	if (l.size() != r.size()) return false;
+	return l.empty() || _strnicmp(l.data(), r.data(), l.size()) == 0;
+}
+
 struct text_range
 {
 	size_t begin;
@@ -1555,8 +1573,22 @@ struct ltstr
 	}
 };
 
-int value_index(const std::string& val, const char* strings, int defValue = -1, char delim = ';');
-bool value_in_list(const std::string& val, const char* strings, char delim = ';');
+// Transparent variant, so a map keyed by std::string can be probed with a
+// string_view without materialising a temporary std::string per lookup.
+struct ltstr_sv
+{
+	using is_transparent = void;
+
+	bool operator()(const std::string_view s1, const std::string_view s2) const
+	{
+		const auto n = std::min(s1.size(), s2.size());
+		const auto r = n ? _strnicmp(s1.data(), s2.data(), n) : 0;
+		return r ? r < 0 : s1.size() < s2.size();
+	}
+};
+
+int value_index(std::string_view val, const char* strings, int defValue = -1, char delim = ';');
+bool value_in_list(std::string_view val, const char* strings, char delim = ';');
 
 std::string::size_type find_close_bracket(const std::string& s, std::string::size_type off, char open_b = '(',
                                           char close_b = ')');
@@ -1644,6 +1676,11 @@ public:
 	bool is_predefined() const
 	{
 		return m_is_predefined && !m_is_calc;
+	}
+
+	bool is_calc() const
+	{
+		return m_is_calc;
 	}
 
 	void predef(const int val)
@@ -2102,89 +2139,11 @@ struct attr_border
 };
 
 
-// Rename utf16_instream since internal strings are now UTF-8.
-// This class wraps a std::string (UTF-8) and returns codepoints for the scanner.
-
-
-class utf8_instream
-{
-	const std::string& _s;
-	std::string::const_iterator _i;
-
-public:
-	utf8_instream(const std::string& s) : _s(s), _i(_s.begin())
-	{
-	}
-
-	wchar_t getb()
-	{
-		return _i == _s.end() ? 0 : static_cast<wchar_t>(static_cast<unsigned char>(*_i++));
-	}
-
-	wchar_t get_next_utf8(const wchar_t val)
-	{
-		return val & 0x3f;
-	}
-
-	wchar_t get_char()
-	{
-		const wchar_t b1 = getb();
-
-		if (!b1)
-		{
-			return 0;
-		}
-
-		if ((b1 & 0x80) == 0)
-		{
-			return b1;
-		}
-		if ((b1 & 0xe0) == 0xc0)
-		{
-			wchar_t r = (b1 & 0x1f) << 6;
-			r |= get_next_utf8(getb());
-			return r;
-		}
-		if ((b1 & 0xf0) == 0xe0)
-		{
-			wchar_t r = (b1 & 0x0f) << 12;
-			r |= get_next_utf8(getb()) << 6;
-			r |= get_next_utf8(getb());
-			return r;
-		}
-		if ((b1 & 0xf8) == 0xf0)
-		{
-			const int b2 = get_next_utf8(getb());
-			const int b3 = get_next_utf8(getb());
-			const int b4 = get_next_utf8(getb());
-			return (b1 & 7) << 18 | (b2 & 0x3f) << 12 |
-				(b3 & 0x3f) << 6 | b4 & 0x3f;
-		}
-
-		return '?';
-	}
-
-	static void wchar_to_chars(const wchar_t code, std::string& dst)
-	{
-		if (code < 0x80)
-		{
-			dst += static_cast<char>(code);
-		}
-		else if (code < 0x800)
-		{
-			dst += static_cast<char>(0xC0 | (code >> 6));
-			dst += static_cast<char>(0x80 | (code & 0x3F));
-		}
-		else
-		{
-			dst += static_cast<char>(0xE0 | (code >> 12));
-			dst += static_cast<char>(0x80 | ((code >> 6) & 0x3F));
-			dst += static_cast<char>(0x80 | (code & 0x3F));
-		}
-	}
-};
-
-using default_instream = utf8_instream;
+// Decode a byte buffer into UTF-8. The encoding is taken from (in order): a
+// byte-order mark, the HTTP Content-Type charset, a <meta charset> in the
+// leading bytes, and finally a UTF-8 validity check with a windows-1252
+// fallback.
+std::string decode_to_utf8(std::string_view bytes, std::string_view content_type);
 
 
 class should
@@ -2292,3 +2251,11 @@ public:
 		output << "</body></html>";
 	}
 };
+
+// Implemented in document.cpp so the tokenizer can contribute its own cases
+// without core.cpp having to depend on the parser headers.
+void register_scanner_tests(tests& t);
+
+void register_style_tests(tests& t);
+
+void register_layout_tests(tests& t);

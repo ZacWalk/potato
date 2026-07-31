@@ -2,14 +2,11 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Build potato.sln (Debug x64)",
-            "type": "process",
-            "command": "msbuild",
+            "label": "dd run",
+            "type": "shell",
+            "command": "${workspaceFolder}/dd.ps1",
             "args": [
-                "${workspaceFolder}/potato.sln",
-                "/p:Configuration=Debug",
-                "/p:Platform=x64",
-                "/m"
+                "run"
             ],
             "group": {
                 "kind": "build",

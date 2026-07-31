@@ -97,6 +97,10 @@ struct list_marker
 	position pos;
 };
 
+// Measuring an image needs no drawing surface, so layout can call this without
+// a renderer or a window.
+size image_size(const pf::bitmap_ptr& bm);
+
 class render_win32
 {
 protected:
@@ -112,7 +116,6 @@ public:
 	~render_win32() = default;
 
 	void draw_image(const pf::bitmap_ptr& bm, const position& pos);
-	size get_image_size(const pf::bitmap_ptr& bm);
 
 	void apply_clip();
 	void del_clip();
@@ -127,7 +130,6 @@ public:
 	void fill_rect(int x, int y, int width, int height, const web_color& color, const css_border_radius& radius);
 	void release_clip();
 	void set_clip(const position& pos, bool valid_x, bool valid_y);
-	int line_height(pf::font_handle hFont);
 };
 
 
@@ -150,9 +152,130 @@ public:
 };
 
 
+// Every property this engine can actually read. Author CSS naming anything else
+// is discarded at parse time -- nothing would ever look it up, and real pages
+// carry a lot of it (transitions, transforms, grid, box-shadow ...).
+enum class prop_id : uint16_t
+{
+	potato_border_spacing_x,
+	potato_border_spacing_y,
+	align_items,
+	align_self,
+	background_attachment,
+	background_clip,
+	background_color,
+	background_image,
+	background_image_baseurl,
+	background_origin,
+	background_position,
+	background_repeat,
+	background_size,
+	border_bottom_color,
+	border_bottom_left_radius_x,
+	border_bottom_left_radius_y,
+	border_bottom_right_radius_x,
+	border_bottom_right_radius_y,
+	border_bottom_style,
+	border_bottom_width,
+	border_collapse,
+	border_left_color,
+	border_left_style,
+	border_left_width,
+	border_radius_x,
+	border_radius_y,
+	border_right_color,
+	border_right_style,
+	border_right_width,
+	border_spacing,
+	border_top_color,
+	border_top_left_radius_x,
+	border_top_left_radius_y,
+	border_top_right_radius_x,
+	border_top_right_radius_y,
+	border_top_style,
+	border_top_width,
+	border_width,
+	bottom,
+	box_sizing,
+	clear,
+	color,
+	content,
+	cursor,
+	display,
+	flex_basis,
+	flex_direction,
+	flex_grow,
+	flex_shrink,
+	flex_wrap,
+	float_,
+	font_family,
+	font_size,
+	font_style,
+	font_variant,
+	font_weight,
+	gap,
+	height,
+	justify_content,
+	left,
+	line_height,
+	list_style_image,
+	list_style_image_baseurl,
+	list_style_position,
+	list_style_type,
+	margin_bottom,
+	margin_left,
+	margin_right,
+	margin_top,
+	max_height,
+	max_width,
+	min_height,
+	min_width,
+	overflow,
+	padding_bottom,
+	padding_left,
+	padding_right,
+	padding_top,
+	position,
+	right,
+	text_align,
+	text_decoration,
+	text_indent,
+	text_transform,
+	top,
+	vertical_align,
+	visibility,
+	white_space,
+	width,
+	z_index,
+
+	count,
+	unknown = 0xFFFF,
+};
+
+// Semicolon table in prop_id order; searched by value_index.
+extern const char* prop_id_strings;
+
+prop_id prop_from_name(std::string_view name);
+
+
 class style
 {
-	std::map<std::string, property_value, ltstr> m_properties;
+	// Sorted by id, so a cascade merge is a linear walk over integers rather
+	// than a tree of case-insensitive string compares.
+	struct entry
+	{
+		prop_id id;
+		bool important;
+		std::string value;
+	};
+
+	std::vector<entry> m_props;
+
+	// Author-defined --custom properties, rare enough to keep out of the way.
+	std::vector<std::pair<std::string, std::string>> m_custom;
+
+	entry* find(prop_id id);
+	const entry* find(prop_id id) const;
 
 public:
 	style() = default;
@@ -168,23 +291,20 @@ public:
 
 	void add_property(const std::string& name, const std::string& val, const std::string& baseurl, bool important);
 
-	const std::string get_property(const std::string& name) const
+	std::string_view get_property(const prop_id id) const
 	{
-		const auto f = m_properties.find(name);
-
-		if (f != m_properties.end())
-		{
-			return f->second.m_value;
-		}
-
-		return empty;
+		const auto* e = find(id);
+		return e ? std::string_view(e->value) : std::string_view();
 	}
+
+	std::string_view get_custom_property(std::string_view name) const;
 
 	void combine(const style& src);
 
 	void clear()
 	{
-		m_properties.clear();
+		m_props.clear();
+		m_custom.clear();
 	}
 
 private:
@@ -197,6 +317,7 @@ private:
 	void parse_short_font(const std::string& val, bool important);
 
 	void add_parsed_property(const std::string& name, const std::string& val, bool important);
+	void add_parsed_property(prop_id id, std::string_view val, bool important);
 	void remove_property(const std::string& name, bool important);
 };
 
@@ -216,6 +337,7 @@ class media_query
 {
 	std::vector<media_query_expression> m_expressions;
 	bool m_not = false;
+	bool m_valid = true;
 	media_type m_media_type = media_type_all;
 
 public:

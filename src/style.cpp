@@ -6,6 +6,77 @@
 #include "document.h"
 
 
+auto prop_id_strings =
+	"-potato-border-spacing-x;-potato-border-spacing-y;align-items;align-self;"
+	"background-attachment;background-clip;background-color;background-image;"
+	"background-image-baseurl;background-origin;background-position;background-repeat;"
+	"background-size;border-bottom-color;border-bottom-left-radius-x;border-bottom-left-radius-y;"
+	"border-bottom-right-radius-x;border-bottom-right-radius-y;border-bottom-style;border-bottom-width;"
+	"border-collapse;border-left-color;border-left-style;border-left-width;"
+	"border-radius-x;border-radius-y;border-right-color;border-right-style;"
+	"border-right-width;border-spacing;border-top-color;border-top-left-radius-x;"
+	"border-top-left-radius-y;border-top-right-radius-x;border-top-right-radius-y;border-top-style;"
+	"border-top-width;border-width;bottom;box-sizing;"
+	"clear;color;content;cursor;"
+	"display;flex-basis;flex-direction;flex-grow;"
+	"flex-shrink;flex-wrap;float;font-family;"
+	"font-size;font-style;font-variant;font-weight;"
+	"gap;height;justify-content;left;"
+	"line-height;list-style-image;list-style-image-baseurl;list-style-position;"
+	"list-style-type;margin-bottom;margin-left;margin-right;"
+	"margin-top;max-height;max-width;min-height;"
+	"min-width;overflow;padding-bottom;padding-left;"
+	"padding-right;padding-top;position;right;"
+	"text-align;text-decoration;text-indent;text-transform;"
+	"top;vertical-align;visibility;white-space;"
+	"width;z-index";
+
+prop_id prop_from_name(const std::string_view name)
+{
+	const auto i = value_index(name, prop_id_strings);
+	return i < 0 ? prop_id::unknown : static_cast<prop_id>(i);
+}
+
+style::entry* style::find(const prop_id id)
+{
+	const auto it = std::lower_bound(m_props.begin(), m_props.end(), id,
+	                                 [](const entry& e, const prop_id v) { return e.id < v; });
+	return it != m_props.end() && it->id == id ? &*it : nullptr;
+}
+
+const style::entry* style::find(const prop_id id) const
+{
+	return const_cast<style*>(this)->find(id);
+}
+
+std::string_view style::get_custom_property(const std::string_view name) const
+{
+	for (const auto& [key, value] : m_custom)
+	{
+		if (is_equal(key, name)) return value;
+	}
+
+	return {};
+}
+
+static void should_map_every_property_id()
+{
+	const auto names = split_string(prop_id_strings, ';');
+	should::equal(static_cast<int>(prop_id::count), static_cast<int>(names.size()), "prop_id table size");
+
+	for (size_t i = 0; i < names.size(); ++i)
+	{
+		should::equal(static_cast<int>(i), static_cast<int>(prop_from_name(names[i])), names[i].c_str());
+	}
+
+	should::equal(static_cast<int>(prop_id::unknown), static_cast<int>(prop_from_name("box-shadow")), "unknown");
+}
+
+void register_style_tests(tests& t)
+{
+	t.register_test("Style: property id table", should_map_every_property_id);
+}
+
 void style::parse(const std::string& txt, const std::string& baseurl)
 {
 	const auto declarations = split_string(txt, ';');
@@ -55,9 +126,22 @@ void style::parse_property(const std::string& name, const std::string& val, cons
 
 void style::combine(const style& src)
 {
-	for (const auto& prop : src.m_properties)
+	for (const auto& e : src.m_props)
 	{
-		add_parsed_property(prop.first, prop.second.m_value, prop.second.m_important);
+		add_parsed_property(e.id, e.value, e.important);
+	}
+
+	for (const auto& [key, value] : src.m_custom)
+	{
+		if (const auto it = std::ranges::find_if(m_custom, [&](const auto& c) { return is_equal(c.first, key); });
+			it != m_custom.end())
+		{
+			it->second = value;
+		}
+		else
+		{
+			m_custom.emplace_back(key, value);
+		}
 	}
 }
 
@@ -422,7 +506,7 @@ void style::parse_short_border(const std::string& key, const std::string& val, c
 
 void style::parse_border_style(const char* style, const std::string& val, const bool important)
 {
-	const std::string key("border");
+	constexpr std::string key("border");
 
 	const auto tokens = split_string(val);
 
@@ -518,10 +602,10 @@ void style::parse_short_background(const std::string& val, const std::string& ba
 			tok[0] == '.' ||
 			tok[0] == '+')
 		{
-			if (m_properties.contains("background-position"))
+			if (auto* e = find(prop_id::background_position))
 			{
-				m_properties["background-position"].m_value = m_properties["background-position"].m_value +
-					" " + tok;
+				e->value += " ";
+				e->value += tok;
 			}
 			else
 			{
@@ -540,6 +624,17 @@ void style::parse_short_background(const std::string& val, const std::string& ba
 
 void style::parse_short_font(const std::string& val, const bool important)
 {
+	if (val == "inherit" || val == "initial" || val == "unset")
+	{
+		add_parsed_property("font-style", val, important);
+		add_parsed_property("font-variant", val, important);
+		add_parsed_property("font-weight", val, important);
+		add_parsed_property("font-size", val, important);
+		add_parsed_property("line-height", val, important);
+		add_parsed_property("font-family", val, important);
+		return;
+	}
+
 	add_parsed_property("font-style", "normal", important);
 	add_parsed_property("font-variant", "normal", important);
 	add_parsed_property("font-weight", "normal", important);
@@ -617,41 +712,64 @@ void style::parse_short_font(const std::string& val, const bool important)
 
 void style::add_parsed_property(const std::string& name, const std::string& val_in, const bool important)
 {
-	auto val = val_in;
+	std::string_view val = val_in;
 
 	// unquot 
 	if (val.size() > 1 && val.front() == val.back() && val.front() == '"')
 	{
-		val.erase(0, 1);
-		val.pop_back();
+		val.remove_prefix(1);
+		val.remove_suffix(1);
 	}
 
-	const auto found = m_properties.find(name);
-
-	if (found != m_properties.end())
+	if (name.starts_with("--"))
 	{
-		if (!found->second.m_important || (important && found->second.m_important))
+		if (const auto it = std::ranges::find_if(m_custom, [&](const auto& c) { return is_equal(c.first, name); });
+			it != m_custom.end())
 		{
-			found->second.m_value = val;
-			found->second.m_important = important;
+			it->second = val;
 		}
+		else
+		{
+			m_custom.emplace_back(name, val);
+		}
+		return;
 	}
-	else
+
+	add_parsed_property(prop_from_name(name), val, important);
+}
+
+void style::add_parsed_property(const prop_id id, const std::string_view val, const bool important)
+{
+	if (id == prop_id::unknown)
 	{
-		m_properties[name] = property_value(val, important);
+		return;
 	}
+
+	const auto it = std::lower_bound(m_props.begin(), m_props.end(), id,
+	                                 [](const entry& e, const prop_id v) { return e.id < v; });
+
+	if (it != m_props.end() && it->id == id)
+	{
+		if (!it->important || important)
+		{
+			it->value = val;
+			it->important = important;
+		}
+		return;
+	}
+
+	m_props.insert(it, entry{id, important, std::string(val)});
 }
 
 void style::remove_property(const std::string& name, const bool important)
 {
-	const auto found = m_properties.find(name);
+	const auto id = prop_from_name(name);
+	const auto it = std::lower_bound(m_props.begin(), m_props.end(), id,
+	                                 [](const entry& e, const prop_id v) { return e.id < v; });
 
-	if (found != m_properties.end())
+	if (it != m_props.end() && it->id == id && (!it->important || important))
 	{
-		if (!found->second.m_important || (important && found->second.m_important))
-		{
-			m_properties.erase(found);
-		}
+		m_props.erase(it);
 	}
 }
 
@@ -735,11 +853,26 @@ std::shared_ptr<media_query> media_query::create_from_string(const std::string& 
 					}
 					query->m_expressions.push_back(expr);
 				}
+				else
+				{
+					query->m_valid = false;
+				}
 			}
+		}
+		else if (tok == "and" || tok == "only")
+		{
 		}
 		else
 		{
-			query->m_media_type = static_cast<media_type>(value_index(tok, media_type_strings, media_type_all));
+			const auto media_type_index = value_index(tok, media_type_strings, -1);
+			if (media_type_index < 0)
+			{
+				query->m_valid = false;
+			}
+			else
+			{
+				query->m_media_type = static_cast<media_type>(media_type_index);
+			}
 		}
 	}
 
@@ -748,6 +881,11 @@ std::shared_ptr<media_query> media_query::create_from_string(const std::string& 
 
 bool media_query::check(const media_features& features) const
 {
+	if (!m_valid)
+	{
+		return false;
+	}
+
 	bool res = false;
 	if (m_media_type == media_type_all || m_media_type == features.type)
 	{
@@ -1751,12 +1889,6 @@ static void draw_img_bg(pf::draw_context& dc, const pf::bitmap_ptr& bgbmp, const
 }
 
 
-int render_win32::line_height(const pf::font_handle hFont)
-{
-	return pf::line_height_for_font(hFont);
-}
-
-
 void render_win32::draw_text(const char* text, const pf::font_handle hFont, const web_color& color, const position& pos)
 {
 	apply_clip();
@@ -1809,7 +1941,7 @@ void render_win32::draw_image(const pf::bitmap_ptr& bm, const position& pos)
 	draw_img(*_ctx, bm, pos);
 }
 
-size render_win32::get_image_size(const pf::bitmap_ptr& bm)
+size image_size(const pf::bitmap_ptr& bm)
 {
 	return get_img_size(bm);
 }
@@ -1876,7 +2008,7 @@ void render_win32::release_clip()
 }
 
 void render_win32::draw_ellipse(const int x, const int y, const int width, const int height, const web_color& color,
-                                int line_width)
+                                const int line_width)
 {
 	_ctx->draw_ellipse(x, y, width, height, to_pf_color(color), line_width > 0 ? line_width : 1);
 }
