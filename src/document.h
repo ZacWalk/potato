@@ -259,8 +259,6 @@ class document : public std::enable_shared_from_this<document>
 	std::map<std::string, pf::bitmap_ptr, ltstr> m_images;
 
 public:
-	std::unique_ptr<element> m_parsed_root;
-
 	document(view_host& view);
 	~document();
 
@@ -290,10 +288,8 @@ public:
 	bool on_mouse_leave(position::vector& redraw_boxes);
 
 	element* root() { return m_root.get(); };
-	const position::vector& get_fixed_boxes() const { return m_fixed_boxes; }
 	void add_fixed_box(const position& pos);
 	void add_media_list(const std::shared_ptr<media_query_list>& list);
-	bool media_changed();
 	const std::string& url() const { return m_url; };
 
 	void set_caption(const std::string& caption);
@@ -310,7 +306,6 @@ public:
 	pf::bitmap_ptr find_image(const std::string& url, const std::string& base);
 
 	int text_width(std::string_view text, pf::font_handle hFont);
-	void delete_font(pf::font_handle hFont);
 
 
 	position client_pos() const { return m_client_pos; };
@@ -322,14 +317,13 @@ public:
 		return 16;
 	}
 
-	static const std::string get_default_font_name()
+	static const std::string& get_default_font_name()
 	{
-		return "Times New Roman";
+		static const std::string name = "Times New Roman";
+		return name;
 	}
 
 	void set_root(std::unique_ptr<element> r);
-	void resolve_styles();
-	void finalize();
 	void add_stylesheet(const std::string& text, const std::string& baseurl, const std::string& media);
 
 	// Parse `bytes` (raw, any encoding) as the document source. The decoded
@@ -341,9 +335,6 @@ public:
 	friend class html_view;
 
 private:
-	element* add_root();
-	element* add_body();
-
 	pf::font_handle add_font(const std::string& name, int size, const std::string& weight, const std::string& style,
 	                         const std::string& decoration, font_metrics* fm);
 

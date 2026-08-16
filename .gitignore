@@ -187,3 +187,9 @@ FakesAssemblies/
 /exe/potato.iobj
 *.ipdb
 *.exe
+
+# CMake / Ninja
+/build/
+/Exe/
+CMakeUserPresets.json
+debug_trace.log

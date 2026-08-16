@@ -1,112 +1,10 @@
-// core.cpp - String normalization, CSS color parsing (hex/rgb/hsl/named),
-// value_index lookups into semicolon-delimited tables, split_string, and
-// autocomplete text_match rendering.
+// core.cpp - CSS color parsing (hex/rgb/hsl/named), value_index lookups into
+// semicolon-delimited tables, split_string, and byte-stream charset decoding.
 
 #include "pch.h"
-// ui.h removed: color constants and helpers (lighten/emphasize/get_*) live in core.h.
 
 
 std::string empty;
-
-char normalize(const char c)
-{
-	const auto uc = static_cast<unsigned char>(c);
-	switch (uc)
-	{
-	case 0xE1: // á (in Latin-1/ISO-8859-1)
-	case 0xE4: // ä
-	case 0xE0: // à
-	case 0xE2: // â
-	case 0xE3: // ã
-	case 0xE5: // å
-		return 'a';
-	case 0xE9: // é
-	case 0xEB: // ë
-	case 0xE8: // è
-	case 0xEA: // ê
-		return 'e';
-	case 0xED: // í
-	case 0xEF: // ï
-	case 0xEC: // ì
-	case 0xEE: // î
-		return 'i';
-	case 0xF3: // ó
-	case 0xF6: // ö
-	case 0xF2: // ò
-	case 0xF4: // ô
-	case 0xF5: // õ
-		return 'o';
-	case 0xFA: // ú
-	case 0xFC: // ü
-	case 0xF9: // ù
-	case 0xFB: // û
-		return 'u';
-	default:
-		return static_cast<char>(tolower(uc));
-	}
-}
-
-
-void text_match::draw(pf::draw_context& dc, const recti& rr, const pf::font_handle font) const
-{
-	auto r = rr;
-
-	const auto unpack = [](const unsigned c)
-	{
-		return pf::color_t(static_cast<uint8_t>(c & 0xff),
-		                   static_cast<uint8_t>((c >> 8) & 0xff),
-		                   static_cast<uint8_t>((c >> 16) & 0xff));
-	};
-
-	constexpr auto normalText = color::text;
-	const auto highlightBk = lighten(color::task_background, 64);
-	const auto propertyText = emphasize(normalText);
-
-	if (!_prefix.empty())
-	{
-		const auto sz = dc.measure_text_h(_prefix, font);
-		const auto y = r.top + (r.height() - sz.cy) / 2;
-		dc.draw_text_h(r.left, y, _prefix, font, unpack(propertyText));
-		r.left += sz.cx + 2;
-		dc.draw_text_h(r.left, y, ":", font, unpack(propertyText));
-		r.left += 8;
-	}
-
-	if (_selection.empty())
-	{
-		const auto sz = dc.measure_text_h(_text, font);
-		dc.draw_text_h(r.left, r.top + (r.height() - sz.cy) / 2, _text, font, unpack(normalText));
-	}
-	else
-	{
-		const auto begin = _selection.begin;
-		const auto end = _selection.end;
-		const auto text_left = std::string_view(_text).substr(0, begin);
-		const auto text_mid = std::string_view(_text).substr(begin, end - begin);
-		const auto text_right = std::string_view(_text).substr(end);
-
-		const auto extent_left = dc.measure_text_h(text_left, font);
-		const auto extent_mid = dc.measure_text_h(text_mid, font);
-		const auto extent_right = dc.measure_text_h(text_right, font);
-
-		const auto h = Max(extent_left.cy, extent_mid.cy, extent_right.cy);
-		const auto y = r.top + (r.height() - h) / 2;
-
-		if (!text_mid.empty())
-		{
-			const pf::irect mid_rect(r.left + extent_left.cx, y,
-			                         r.left + extent_left.cx + extent_mid.cx, y + h);
-			dc.fill_solid_rect(mid_rect, unpack(highlightBk));
-			dc.draw_text_h(r.left + extent_left.cx, y, text_mid, font, unpack(normalText));
-		}
-
-		if (!text_left.empty())
-			dc.draw_text_h(r.left, y, text_left, font, unpack(normalText));
-
-		if (!text_right.empty())
-			dc.draw_text_h(r.left + extent_left.cx + extent_mid.cx, y, text_right, font, unpack(normalText));
-	}
-}
 
 std::string::size_type find_close_bracket(const std::string& s, const std::string::size_type off,
                                           const char open_b, const char close_b)
@@ -326,59 +224,58 @@ std::vector<std::string> split_string(const std::string& strings, const char del
 	return split_string(strings, delims, "\"'");
 }
 
+// A delimiter inside quotes or inside a parenthesised group never splits. CSS
+// values rely on both: `url(data:image/svg+xml;base64,..)` carries the
+// declaration separator, and `margin: calc(1px + 2px) 0` carries the value
+// separator.
 std::vector<std::string> split_string(const std::string& strings, const char* delims, const char* quote)
 {
 	std::vector<std::string> results;
 
+	if (strings.empty()) return results;
+
 	if (strings.find_first_not_of(delims) == std::string::npos)
 	{
-		if (!strings.empty()) results.push_back(strings);
+		results.push_back(strings);
 		return results;
 	}
 
-	if (!strings.empty())
+	char quote_char = 0;
+	int depth = 0;
+	std::string current;
+
+	for (const auto c : strings)
 	{
-		bool inQuotes = false;
-		char quoteChar = 0;
-		auto p = strings.c_str();
-
-		std::string current;
-
-		while (*p != 0)
+		if (quote_char)
 		{
-			if (one_of(*p, quote) && (quoteChar == 0 || quoteChar == *p))
-			{
-				current += *p;
-				inQuotes = !inQuotes;
+			current += c;
+			if (c == quote_char) quote_char = 0;
+			continue;
+		}
 
-				if (inQuotes)
-				{
-					quoteChar = *p;
-					if (quoteChar == '(') quoteChar = ')';
-					if (quoteChar == '[') quoteChar = ']';
-				}
-				else
-				{
-					quoteChar = 0;
-				}
-			}
-			else if (inQuotes || !one_of(*p, delims))
-			{
-				current += *p;
-			}
-			else
-			{
-				current = trimmed(current);
-				if (!current.empty()) results.push_back(current);
-				current.clear();
-			}
+		if (one_of(c, quote))
+		{
+			quote_char = c;
+			current += c;
+			continue;
+		}
 
-			p++;
+		if (c == '(') ++depth;
+		else if (c == ')' && depth) --depth;
+
+		if (depth || !one_of(c, delims))
+		{
+			current += c;
+			continue;
 		}
 
 		current = trimmed(current);
 		if (!current.empty()) results.push_back(current);
+		current.clear();
 	}
+
+	current = trimmed(current);
+	if (!current.empty()) results.push_back(current);
 
 	return results;
 }

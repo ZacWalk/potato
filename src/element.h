@@ -528,10 +528,10 @@ public:
 	bool set_pseudo_class(const std::string& pclass, bool add);
 	const std::string& get_tag_name() const { return m_tag; }
 	std::string_view get_attr(std::string_view name, std::string_view def = {}) const;
-	const std::string get_cursor() const;
-	const std::string get_style_property(prop_id name, bool inherited,
-	                                     std::string_view def = {}) const;
-	const std::string get_text() const;
+	std::string get_cursor() const;
+	std::string get_style_property(prop_id name, bool inherited,
+	                               std::string_view def = {}) const;
+	std::string get_text() const;
 	css_length get_css_bottom() const;
 	css_length get_css_height() const;
 	css_length get_css_left() const;
