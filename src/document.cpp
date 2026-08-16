@@ -5,7 +5,6 @@
 #include "pch.h"
 #include "document.h"
 // ui.h removed: document.cpp now uses view_host + dispatch_to_ui/async from core.h
-#include "resource.h"
 
 namespace
 {
@@ -155,7 +154,11 @@ bool http::download_file(const std::string& url_in, const std::shared_ptr<http_r
 
 	const std::string temp_path = pf::platform_temp_file_path("pot");
 	auto file = pf::open_file_for_write(pf::file_path(temp_path));
-	if (!file) return false;
+	if (!file)
+	{
+		pf::platform_delete_file(pf::file_path(temp_path));
+		return false;
+	}
 
 	{
 		std::lock_guard lk(m_mutex);
@@ -210,6 +213,9 @@ bool http::download_file(const std::string& url_in, const std::shared_ptr<http_r
 				error, status, url_capture = std::move(url_capture), req]()
 			{
 				if (cb_user) cb_user(file_path, error, status, url_capture);
+				// The callback reads the body synchronously, so the download's
+				// scratch file has no readers left once it returns.
+				pf::platform_delete_file(pf::file_path(file_path));
 			});
 	};
 	cb.on_complete = [finish]() { finish(0); };
@@ -218,6 +224,8 @@ bool http::download_file(const std::string& url_in, const std::shared_ptr<http_r
 	auto async = m_session->get(url, std::move(cb));
 	if (!async)
 	{
+		ctx->file.reset();
+		pf::platform_delete_file(pf::file_path(temp_path));
 		std::lock_guard lk(m_mutex);
 		std::erase(m_requests, request);
 		return false;
@@ -1284,7 +1292,7 @@ void register_layout_tests(tests& t)
 	});
 	t.register_test("Layout: bbc news", []
 	{
-		should_lay_out_fixture("bbc-news.html", 1904, 5365);
+		should_lay_out_fixture("bbc-news.html", 1904, 5369);
 	});
 
 	// Selector bucketing reads id/class before parse_styles runs, so these
@@ -1428,6 +1436,83 @@ void register_layout_tests(tests& t)
 			"<body><div id='h'><img id='t' src='never.png'></div></body></html>", "t");
 		should::equal(400, box.width, "image width");
 		should::equal(60, box.height, "image height");
+	});
+
+	// A shorthand value splits on top-level separators only. Splitting inside
+	// the parentheses turned "calc(20px + 10px) 0" into four bogus values, one
+	// of which parsed as an auto margin.
+	t.register_test("Style: shorthand keeps calc() intact", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#t{width:100px;height:20px;padding:calc(20px + 10px) 0}</style></head>"
+			"<body><div id='t'></div></body></html>", "t");
+		should::equal(100, box.width, "padded width");
+		should::equal(80, box.height, "padded height");
+
+		const auto margined = should_box_of(
+			"<html><head><style>#t{width:100px;height:20px;margin:calc(5px + 5px) 0}</style></head>"
+			"<body><div id='t'></div></body></html>", "t");
+		should::equal(100, margined.width, "margined width");
+		should::equal(40, margined.height, "margined height");
+	});
+
+	// A declaration separator inside url() is part of the value, not the end
+	// of the declaration.
+	t.register_test("Style: data url keeps the declaration intact", []
+	{
+		const auto box = should_box_of(
+			"<html><head><style>#t{background:url(data:image/gif;base64,AA==) no-repeat;"
+			"width:100px;height:20px}</style></head>"
+			"<body><div id='t'></div></body></html>", "t");
+		should::equal(100, box.width, "width survives the data url");
+		should::equal(20, box.height, "height survives the data url");
+	});
+
+	// :nth-child(An+B), including a negative step, used to assert and return
+	// nonsense rather than select anything.
+	t.register_test("Style: nth-child selects An+B", []
+	{
+		const std::string html =
+			"<html><head><style>li{height:10px}li:nth-child(2n+1){height:40px}</style></head>"
+			"<body><ul><li id='a'></li><li id='b'></li><li id='c'></li></ul></body></html>";
+		should::equal(40, should_box_of(html, "a").height, "first matches 2n+1");
+		should::equal(10, should_box_of(html, "b").height, "second does not");
+		should::equal(40, should_box_of(html, "c").height, "third matches 2n+1");
+
+		const std::string negative =
+			"<html><head><style>li{height:10px}li:nth-child(-n+2){height:40px}</style></head>"
+			"<body><ul><li id='a'></li><li id='b'></li><li id='c'></li></ul></body></html>";
+		should::equal(40, should_box_of(negative, "a").height, "first matches -n+2");
+		should::equal(40, should_box_of(negative, "b").height, "second matches -n+2");
+		should::equal(10, should_box_of(negative, "c").height, "third does not");
+	});
+
+	// A compound media query has to evaluate every expression, not just the
+	// first one it can parse.
+	t.register_test("Style: compound media query evaluates both terms", []
+	{
+		const std::string html =
+			"<html><head><style>#t{width:100px;height:20px}"
+			"@media screen and (min-width:5000px){#t{height:400px}}</style></head>"
+			"<body><div id='t'></div></body></html>";
+		should::equal(20, should_box_of(html, "t", 1000).height, "unmatched min-width suppresses the rule");
+	});
+
+	// A combinator is only a combinator between two compounds; whitespace
+	// around it must not change which compound is the subject.
+	t.register_test("Style: spaced combinators bind the same as tight ones", []
+	{
+		const std::string spaced =
+			"<html><head><style>p{margin:0;height:5px}div > p{height:40px}</style></head>"
+			"<body><div><p id='t'></p></div><p id='u'></p></body></html>";
+		should::equal(40, should_box_of(spaced, "t").height, "child of div matches");
+		should::equal(5, should_box_of(spaced, "u").height, "sibling of div does not");
+
+		const std::string sibling =
+			"<html><head><style>p{margin:0;height:5px}#a + p{height:40px}</style></head>"
+			"<body><p id='a'></p><p id='b'></p><p id='c'></p></body></html>";
+		should::equal(40, should_box_of(sibling, "b").height, "adjacent sibling matches");
+		should::equal(5, should_box_of(sibling, "c").height, "next-but-one does not");
 	});
 }
 
@@ -1788,7 +1873,6 @@ document::~document()
 
 void document::clear()
 {
-	m_parsed_root.reset();
 	m_root.reset();
 	m_over_element = nullptr;
 
@@ -1870,7 +1954,7 @@ std::shared_ptr<document> document::create_from_bytes(view_host& view, const std
 
 	view.diagnostic("HTML parse completed");
 
-	doc->load_master_stylesheet(load_resource_html(IDR_CSS_MASTER));
+	doc->load_master_stylesheet(load_resource_html("master.css"));
 	doc->set_root(par.release_root());
 
 	return doc;
@@ -1908,18 +1992,6 @@ void document::update_styles(element* root_el)
 		                              std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count(),
 		                              std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count()));
 	}
-}
-
-void document::resolve_styles()
-{
-	update_styles(m_parsed_root.get());
-}
-
-void document::finalize()
-{
-	m_root = std::move(m_parsed_root);
-
-	m_view.layout();
 }
 
 void document::add_stylesheet(const std::string& text, const std::string& baseurl, const std::string& media)
@@ -2040,13 +2112,12 @@ pf::font_handle document::add_font(const std::string& name_in, int size, const s
 			}
 		}
 
-		font_item fi = {0};
+		font_item fi = {};
 
-		auto fonts = split_string(name, ',');
-		trim(fonts[0]);
+		const auto fonts = split_string(name, ',');
 
 		pf::font_def def;
-		def.face = fonts[0];
+		def.face = fonts.empty() ? get_default_font_name() : fonts.front();
 		def.size = size;
 		def.weight = fw;
 		def.italic = fs == font_style_italic;
@@ -2064,11 +2135,12 @@ pf::font_handle document::add_font(const std::string& name_in, int size, const s
 
 		{
 			std::lock_guard lock(m_fonts_mutex);
-			// Another thread may have created the same font while the lock was released;
-			// prefer the existing entry to avoid duplicates.
+			// Another thread may have created the same font while the lock was
+			// released; keep the existing entry and drop the duplicate handle.
 			const auto it = m_fonts.find(key);
 			if (it != m_fonts.end())
 			{
+				if (fi.font) pf::delete_font_handle(fi.font);
 				fi = it->second;
 			}
 			else
@@ -2115,29 +2187,6 @@ pf::font_handle document::get_font(const std::string& name_in, int size, const s
 	}
 
 	return add_font(name, size, weight, style, decoration, fm);
-}
-
-element* document::add_root()
-{
-	if (!m_root)
-	{
-		m_root = std::make_unique<element>(*this, el_html);
-		m_root->set_tag_name("html");
-	}
-	return m_root.get();
-}
-
-element* document::add_body()
-{
-	if (!m_root)
-	{
-		add_root();
-	}
-	auto el = std::make_unique<element>(*this, el_body);
-	el->set_tag_name("body");
-	const auto raw = el.get();
-	m_root->append_child(std::move(el));
-	return raw;
 }
 
 int document::render(const int max_width, const render_type rt)
@@ -2711,23 +2760,6 @@ void document::add_fixed_box(const position& pos)
 	m_fixed_boxes.push_back(pos);
 }
 
-bool document::media_changed()
-{
-	if (!m_media_lists.empty())
-	{
-		media_features features;
-		get_media_features(features);
-
-		if (update_media_lists(features))
-		{
-			m_root->refresh_styles();
-			m_root->parse_styles();
-			return true;
-		}
-	}
-	return false;
-}
-
 bool document::update_media_lists(const media_features& features)
 {
 	bool update_styles = false;
@@ -2916,11 +2948,6 @@ bool document::is_image_cached(const std::string& src, const std::string& baseur
 	return m_images.contains(url);
 }
 
-
-void document::delete_font(const pf::font_handle hFont)
-{
-	pf::delete_font_handle(hFont);
-}
 
 int document::text_width(const std::string_view text, const pf::font_handle hFont)
 {

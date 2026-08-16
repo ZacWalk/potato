@@ -50,50 +50,9 @@ public:
 	}
 };
 
-// UI thread dispatch. Implementations live in main.cpp and forward to the
-// existing tasks queues defined in ui.h. These declarations exist so that
-// document.cpp / core.cpp do not need to include ui.h.
+// UI thread dispatch. Implemented in main.cpp and forwards to the platform
+// layer's task queue, so document.cpp / core.cpp need not include it.
 void dispatch_to_ui(std::function<void()> fn);
-void dispatch_async(std::function<void()> fn);
-
-namespace color
-{
-	constexpr unsigned highlight = 0x00CC6611;
-	constexpr unsigned hover = 0x00999999;
-	constexpr unsigned text = 0x00ffffff;
-	constexpr unsigned task_background = 0x00777777;
-}
-
-inline unsigned byte_clamp_u(const int n)
-{
-	return n > 255 ? 255u : n < 0 ? 0u : static_cast<unsigned>(n);
-}
-
-inline unsigned saturate_rgba_u(const int r, const int g, const int b, const int a)
-{
-	return byte_clamp_u(r) | byte_clamp_u(g) << 8 | byte_clamp_u(b) << 16 | byte_clamp_u(a) << 24;
-}
-
-inline unsigned get_a(const unsigned c) { return 0xffu & c >> 24; }
-inline unsigned get_r(const unsigned c) { return 0xffu & c; }
-inline unsigned get_g(const unsigned c) { return 0xffu & c >> 8; }
-inline unsigned get_b(const unsigned c) { return 0xffu & c >> 16; }
-
-inline unsigned lighten(const unsigned c, const int n = 32)
-{
-	return saturate_rgba_u(get_r(c) + n, get_g(c) + n, get_b(c) + n, get_a(c));
-}
-
-inline unsigned darken(const unsigned c, const int n = 32)
-{
-	return lighten(c, -n);
-}
-
-inline unsigned emphasize(const unsigned c, const int n = 48)
-{
-	const bool isLight = get_b(c) > 0x80 || get_g(c) > 0x80 || get_r(c) > 0x80;
-	return lighten(c, isLight ? -n : n);
-}
 
 constexpr unsigned int font_decoration_none = 0x00;
 constexpr unsigned int font_decoration_underline = 0x01;
@@ -286,17 +245,6 @@ enum flex_align_items
 	flex_align_items_baseline,
 };
 
-enum style_border
-{
-	border_nope,
-	border_none,
-	border_hidden,
-	border_dotted,
-	border_dashed,
-	border_solid,
-	border_double
-};
-
 #define font_size_strings "xx-small;x-small;small;medium;large;x-large;xx-large;smaller;larger"
 
 enum font_size
@@ -325,7 +273,7 @@ enum font_style
 enum font_variant
 {
 	font_variant_normal,
-	font_variant_italic
+	font_variant_small_caps
 };
 
 #define font_weight_strings "normal;bold;bolder;lighter;100;200;300;400;500;600;700"
@@ -1157,20 +1105,6 @@ inline bool is_empty(const char* sz)
 	return sz == nullptr || sz[0] == 0;
 }
 
-inline const char* strichr(const char* text, const char cc)
-{
-	const auto c = isupper(cc) ? tolower(cc) : cc;
-
-	while (*text)
-	{
-		const auto t = isupper(*text) ? tolower(*text) : *text;
-		if (t == c) return text;
-		text++;
-	}
-
-	return nullptr;
-}
-
 inline std::wstring to_utf16(const char* sz)
 {
 	if (!sz || !*sz) return std::wstring();
@@ -1321,27 +1255,6 @@ inline void transform_text(std::string& text, const text_transform tt)
 	}
 }
 
-char normalize(char c);
-
-inline bool needs_quoting(const char* s)
-{
-	return strpbrk(s, ": \t\'\"") != nullptr;
-}
-
-inline std::string quote_if_needed(__in const std::string& s)
-{
-	if (needs_quoting(s.c_str()))
-	{
-		if (s.find_first_of('\"') == std::string::npos)
-		{
-			return '"' + s + '"';
-		}
-		return '\'' + s + '\'';
-	}
-
-	return s;
-}
-
 inline int icmp(const char* l, const char* r)
 {
 	if (l == r) return 0;
@@ -1384,167 +1297,19 @@ inline bool is_equal(const std::string_view l, const std::string_view r)
 	return l.empty() || _strnicmp(l.data(), r.data(), l.size()) == 0;
 }
 
-struct text_range
-{
-	size_t begin;
-	size_t end;
-
-	text_range() : begin(0), end(0)
-	{
-	}
-
-	text_range(const char* sz) : begin(0), end(sz ? strlen(sz) : 0)
-	{
-	}
-
-	text_range(const size_t b, const size_t e) : begin(b), end(e)
-	{
-	}
-
-	void clear()
-	{
-		begin = end = 0;
-	}
-
-	bool empty() const
-	{
-		return begin == end;
-	}
-
-	bool operator==(const text_range& other) const
-	{
-		return begin == other.begin && end == other.end;
-	}
-
-	size_t size() const
-	{
-		return end - begin;
-	}
-};
-
-inline text_range sub_string(const std::string& string, const std::string& query)
-{
-	auto ps = string.c_str();
-	auto pq = query.c_str();
-	auto start = ps;
-
-	auto s = normalize(*ps++);
-	const auto q = normalize(*pq++);
-
-	while (s)
-	{
-		if (s == q) // Is matching?
-		{
-			auto match_ps = ps;
-			auto match_pq = pq;
-			auto match_s = normalize(*match_ps++);
-			auto match_q = normalize(*match_pq++);
-
-			while (match_s == match_q)
-			{
-				if (match_q == 0)
-					return text_range(start - string.c_str(), match_ps - 1 - string.c_str());
-
-				match_s = normalize(*match_ps++);
-				match_q = normalize(*match_pq++);
-			}
-
-			if (match_q == 0)
-				return text_range(start - string.c_str(), match_ps - 1 - string.c_str());
-		}
-
-		start = ps;
-		s = normalize(*ps++);
-	}
-
-	return text_range();
-}
-
-
-class text_match
-{
-	std::string _text;
-	std::string _prefix;
-
-	text_range _selection;
-
-public:
-	text_match()
-	{
-	}
-
-	explicit text_match(std::string s) : _text(std::move(s))
-	{
-	}
-
-	text_match(const text_match& other) : _text(other._text), _prefix(other._prefix), _selection(other._selection)
-	{
-	}
-
-	void operator=(const text_match& other)
-	{
-		_text = other._text;
-		_prefix = other._prefix;
-		_selection = other._selection;
-	}
-
-	void operator=(const std::string& s)
-	{
-		_prefix.clear();
-		_text = s;
-		_selection.clear();
-	}
-
-	void draw(pf::draw_context& dc, const recti& rr, pf::font_handle font) const;
-
-	void text(const std::string& s, const text_range selection)
-	{
-		assert(s.size() >= selection.begin && s.size() >= selection.end);
-		assert(selection.size() <= s.size());
-
-		_text = s;
-		_selection = selection;
-	};
-
-	std::string text(const bool quoteIfNeeded = false) const
-	{
-		std::string result;
-
-		if (!_prefix.empty())
-		{
-			result += _prefix;
-			result += ":";
-		}
-
-		result += quoteIfNeeded ? quote_if_needed(_text) : _text;
-		return result;
-	};
-
-	void prefix(const std::string& sz)
-	{
-		_prefix = sz;
-	}
-
-	bool operator<(const text_match& other) const
-	{
-		const auto pref = icmp(_prefix, other._prefix);
-		if (pref != 0) return pref < 0;
-		return icmp(_text, other._text) < 0;
-	}
-};
-
 static std::string format(const char* fmt, ...)
 {
-	va_list argList;
-	va_start(argList, fmt);
+	va_list arg_list;
+	va_start(arg_list, fmt);
+	va_list measure_list;
+	va_copy(measure_list, arg_list);
+	const auto length = _vscprintf(fmt, measure_list);
+	va_end(measure_list);
 
-	const auto length = _vscprintf(fmt, argList);
-	const auto sz = static_cast<char*>(_alloca(length + 1));
-	if (sz == nullptr) return "";
-	vsprintf_s(sz, length + 1, fmt, argList);
-	va_end(argList);
-	sz[length] = 0;
-	return sz;
+	std::string result(length < 0 ? 0 : length, '\0');
+	if (length > 0) vsprintf_s(result.data(), result.size() + 1, fmt, arg_list);
+	va_end(arg_list);
+	return result;
 }
 
 static const char* from(const bool val) { return val ? "true" : "false"; };
@@ -2054,9 +1819,9 @@ struct css_position
 };
 
 
-inline std::string load_resource_html(const int id)
+inline std::string load_resource_html(const std::string_view name)
 {
-	return pf::platform_load_text_resource(id);
+	return std::string(pf::embedded_resource_text(name));
 }
 
 inline std::string get_file_contents(const std::string& file_name)
@@ -2075,29 +1840,6 @@ inline std::string get_file_contents(const std::string& file_name)
 	return result;
 }
 
-class scope_locked_count
-{
-	std::atomic<long>& _i;
-
-public:
-	scope_locked_count(std::atomic<long>& i) : _i(i) { ++_i; }
-	~scope_locked_count() { --_i; }
-	scope_locked_count(const scope_locked_count&) = delete;
-	scope_locked_count& operator=(const scope_locked_count&) = delete;
-};
-
-template <typename T1, typename T2, typename T3>
-T1 Min(const T1& x, const T2& y, const T3& z)
-{
-	return std::min({x, static_cast<T1>(y), static_cast<T1>(z)});
-}
-
-template <typename T1, typename T2, typename T3>
-T1 Max(const T1& x, const T2& y, const T3& z)
-{
-	return std::max({x, static_cast<T1>(y), static_cast<T1>(z)});
-}
-
 inline int round_f(const float val)
 {
 	return static_cast<int>(std::lround(val));
@@ -2107,36 +1849,6 @@ inline int round_d(const double val)
 {
 	return static_cast<int>(std::lround(val));
 }
-
-
-struct attr_color
-{
-	unsigned char rgbBlue;
-	unsigned char rgbGreen;
-	unsigned char rgbRed;
-	unsigned char rgbAlpha;
-
-	attr_color()
-	{
-		rgbAlpha = 255;
-		rgbBlue = 0;
-		rgbGreen = 0;
-		rgbRed = 0;
-	}
-};
-
-struct attr_border
-{
-	style_border border;
-	int width;
-	attr_color color;
-
-	attr_border()
-	{
-		border = border_none;
-		width = 0;
-	}
-};
 
 
 // Decode a byte buffer into UTF-8. The encoding is taken from (in order): a

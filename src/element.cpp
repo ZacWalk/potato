@@ -644,8 +644,8 @@ pf::font_handle element::get_font(font_metrics* fm)
 	return m_font;
 }
 
-const std::string element::get_style_property(const prop_id name, const bool inherited,
-                                              const std::string_view def) const
+std::string element::get_style_property(const prop_id name, const bool inherited,
+                                        const std::string_view def) const
 {
 	if (m_type == el_text || m_type == el_space)
 	{
@@ -3781,7 +3781,7 @@ void element::parse_attributes()
 	}
 }
 
-const std::string element::get_text() const
+std::string element::get_text() const
 {
 	if (m_type == el_cdata || m_type == el_comment || m_type == el_text || m_type == el_style || m_type == el_space)
 	{
@@ -4053,7 +4053,7 @@ void element::on_click()
 	}
 }
 
-const std::string element::get_cursor() const
+std::string element::get_cursor() const
 {
 	return get_style_property(prop_id::cursor, true);
 }
@@ -5620,7 +5620,9 @@ bool element::is_nth_child(const element* el, const int num, const int off, cons
 				{
 					if (num != 0)
 					{
-						if (idx - off >= 0 && (idx - off) % num == 0)
+						// An+B matches when (idx - B) is a non-negative multiple of A,
+						// which for a negative A means counting back from B.
+						if ((idx - off) % num == 0 && (idx - off) / num >= 0)
 						{
 							return true;
 						}
@@ -5652,7 +5654,7 @@ bool element::is_nth_last_child(const element* el, const int num, const int off,
 				{
 					if (num != 0)
 					{
-						if (idx - off >= 0 && (idx - off) % num == 0)
+						if ((idx - off) % num == 0 && (idx - off) / num >= 0)
 						{
 							return true;
 						}
@@ -5671,45 +5673,41 @@ bool element::is_nth_last_child(const element* el, const int num, const int off,
 	return false;
 }
 
+// Parses the An+B microsyntax: "odd", "even", "3", "n", "2n", "-n+3", "2n + 1".
 void element::parse_nth_child_params(const std::string& param, int& num, int& off)
 {
-	if (param == "odd")
+	num = 0;
+	off = 0;
+
+	std::string s;
+	for (const auto c : param)
+	{
+		if (!is_space_char(c)) s += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+	}
+
+	if (s == "odd")
 	{
 		num = 2;
 		off = 1;
+		return;
 	}
-	else if (param == "even")
+	if (s == "even")
 	{
 		num = 2;
-		off = 0;
+		return;
 	}
-	else
+
+	const auto n = s.find('n');
+
+	if (n == std::string::npos)
 	{
-		// TODO
-		assert(0);
-		const auto tokens = split_string(param, " n", "n");
-
-		std::string s_num;
-		std::string s_int;
-
-		for (const auto& tok : tokens)
-		{
-			if (tok == "n")
-			{
-				s_num = s_int;
-				s_int.clear();
-			}
-			else
-			{
-				s_int += tok;
-			}
-		}
-
-		const std::string s_off = s_int;
-
-		num = safe_stoi(s_num);
-		off = safe_stoi(s_off);
+		off = safe_stoi(s);
+		return;
 	}
+
+	const auto a = s.substr(0, n);
+	num = a.empty() || a == "+" ? 1 : a == "-" ? -1 : safe_stoi(a);
+	off = safe_stoi(s.substr(n + 1));
 }
 
 void element::calc_document_size(size& sz, const int x /*= 0*/, const int y /*= 0*/)

@@ -1,8 +1,7 @@
 // pch.h - Precompiled header. Includes the platform abstraction header and
 // STL headers. Intentionally does NOT include any Windows SDK headers
 // (windows.h, windowsx.h, commctrl.h, shlwapi.h, strsafe.h, winhttp.h);
-// those live only in src/platform_win.cpp. Files that still depend on Win32
-// types include the relevant header(s) themselves.
+// those live only in the platform-h backend.
 
 #pragma once
 

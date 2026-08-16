@@ -5,7 +5,6 @@
 
 #include "pch.h"
 #include "platform.h"
-#include "resource.h"
 #include "document.h"
 #include "style.h"
 
@@ -19,7 +18,7 @@ namespace
 		pf::window_frame_ptr _frame;
 		std::shared_ptr<document> _doc;
 		std::function<void(const std::string&)> _on_open;
-		std::function<void(uintptr_t)> _on_drop_files;
+		std::function<void(std::span<const pf::file_path>)> _on_drop_files;
 		std::function<void()> _on_focus_address;
 		std::function<void(const std::string&)> _on_diagnostic;
 		std::function<void(const std::string&, const std::string&)> _on_resource_started;
@@ -45,7 +44,7 @@ namespace
 			_on_open = std::move(f);
 		}
 
-		void set_on_drop_files(std::function<void(uintptr_t)> f)
+		void set_on_drop_files(std::function<void(std::span<const pf::file_path>)> f)
 		{
 			_on_drop_files = std::move(f);
 		}
@@ -173,11 +172,11 @@ namespace
 	public:
 		// ── pf::frame_reactor ──
 		uint32_t handle_message(pf::window_frame_ptr, const pf::message_type m,
-		                        const uintptr_t wparam, intptr_t) override
+		                        const pf::message_params& params) override
 		{
 			if (m == pf::message_type::drop_files)
 			{
-				if (_on_drop_files) _on_drop_files(wparam);
+				if (_on_drop_files) _on_drop_files(params.dropped_paths);
 				return 0;
 			}
 			if (m == pf::message_type::erase_background) return 1;
@@ -489,9 +488,8 @@ namespace
 			open_local_file(pf::open_file_path("Open HTML file", {}));
 		}
 
-		void open_dropped_files(const uintptr_t drop_handle)
+		void open_dropped_files(const std::span<const pf::file_path> paths)
 		{
-			const auto paths = pf::dropped_file_paths(drop_handle);
 			if (!paths.empty()) open_local_file(paths.front());
 		}
 
@@ -585,7 +583,7 @@ namespace
 			if (url == "res://test.htm" || url == "about:blank")
 			{
 				_current_url = url;
-				_content_reactor->load_html(url, pf::platform_load_text_resource(IDR_HTML_TEST));
+				_content_reactor->load_html(url, std::string(pf::embedded_resource_text("test.htm")));
 				return;
 			}
 
@@ -775,7 +773,8 @@ namespace
 			_content_reactor = std::make_shared<content_reactor>();
 			_content_reactor->set_frame(_content);
 			_content_reactor->set_on_open([this](const std::string& url) { navigate(url); });
-			_content_reactor->set_on_drop_files([this](const uintptr_t handle) { open_dropped_files(handle); });
+			_content_reactor->set_on_drop_files(
+				[this](const std::span<const pf::file_path> paths) { open_dropped_files(paths); });
 			_content_reactor->set_on_focus_address([this] { focus_address(); });
 			_content_reactor->set_on_diagnostic([this](const std::string& message)
 			{
@@ -830,7 +829,7 @@ namespace
 
 		// ── pf::frame_reactor ─────────────────────────────────────────────
 		uint32_t handle_message(const pf::window_frame_ptr frame, const pf::message_type m,
-		                        const uintptr_t wparam, intptr_t) override
+		                        const pf::message_params& params) override
 		{
 			if (m == pf::message_type::create)
 			{
@@ -845,7 +844,7 @@ namespace
 			}
 			if (m == pf::message_type::drop_files)
 			{
-				open_dropped_files(wparam);
+				open_dropped_files(params.dropped_paths);
 				return 0;
 			}
 			if (m == pf::message_type::timer && !_eval_url.empty())
@@ -1208,14 +1207,9 @@ void app_destroy()
 {
 }
 
-// Portable UI/async dispatch entry points declared in core.h. Forward to the
-// platform layer's task queues.
+// Portable UI dispatch entry point declared in core.h. Forwards to the
+// platform layer's task queue.
 void dispatch_to_ui(std::function<void()> fn)
 {
 	pf::run_ui(std::move(fn));
-}
-
-void dispatch_async(std::function<void()> fn)
-{
-	pf::run_async(std::move(fn));
 }

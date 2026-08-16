@@ -182,7 +182,7 @@ void style::add_property(const std::string& name, const std::string& val, const 
 	// Parse borders shorthand properties 
 	else if (name == "border")
 	{
-		const auto tokens = split_string(val, " ", "(");
+		const auto tokens = split_string(val, " ");
 
 		for (const auto& tok : tokens)
 		{
@@ -284,7 +284,7 @@ void style::add_property(const std::string& name, const std::string& val, const 
 		add_parsed_property("list-style-image", empty, important);
 		add_parsed_property("list-style-image-baseurl", empty, important);
 
-		const auto tokens = split_string(val, " ", "(");
+		const auto tokens = split_string(val, " ");
 
 		for (const auto& tok : tokens)
 		{
@@ -481,7 +481,7 @@ void style::add_property(const std::string& name, const std::string& val, const 
 
 void style::parse_short_border(const std::string& key, const std::string& val, const bool important)
 {
-	const auto tokens = split_string(val, " ", "(");
+	const auto tokens = split_string(val, " ");
 
 	if (tokens.size() >= 3)
 	{
@@ -506,7 +506,7 @@ void style::parse_short_border(const std::string& key, const std::string& val, c
 
 void style::parse_border_style(const char* style, const std::string& val, const bool important)
 {
-	constexpr std::string key("border");
+	static const std::string key("border");
 
 	const auto tokens = split_string(val);
 
@@ -555,7 +555,7 @@ void style::parse_short_background(const std::string& val, const std::string& ba
 		return;
 	}
 
-	const auto tokens = split_string(val, " ", "(");
+	const auto tokens = split_string(val, " ");
 	auto origin_found = false;
 	auto clip_found = false;
 	std::string last_box;
@@ -644,7 +644,6 @@ void style::parse_short_font(const std::string& val, const bool important)
 	const auto tokens = split_string(val, " ", "\"");
 
 	int idx = 0;
-	constexpr bool was_normal = false;
 	bool is_family = false;
 	std::string font_family;
 
@@ -777,7 +776,7 @@ void style::remove_property(const std::string& name, const bool important)
 std::shared_ptr<media_query> media_query::create_from_string(const std::string& str)
 {
 	auto query = std::make_shared<media_query>();
-	const auto tokens = split_string(str, " \t\r\n", "(");
+	const auto tokens = split_string(str, " \t\r\n");
 
 	for (auto tok : tokens)
 	{
@@ -1404,6 +1403,26 @@ void css_element_selector::parse(const std::string& text)
 }
 
 
+// Index of the rightmost combinator at nesting depth zero. Characters inside
+// ( ) or [ ] belong to a functional pseudo-class or an attribute selector, so
+// ":nth-child(2n+1)" must not be split at its '+'.
+static std::string::size_type find_last_combinator(const std::string& text)
+{
+	auto found = std::string::npos;
+	int depth = 0;
+
+	for (std::string::size_type i = 0; i < text.size(); ++i)
+	{
+		const auto c = text[i];
+
+		if (c == '(' || c == '[') ++depth;
+		else if ((c == ')' || c == ']') && depth) --depth;
+		else if (!depth && (c == ' ' || c == '\t' || c == '>' || c == '+' || c == '~')) found = i;
+	}
+
+	return found;
+}
+
 bool css_selector::parse(const std::string& text)
 {
 	if (text.empty())
@@ -1411,46 +1430,39 @@ bool css_selector::parse(const std::string& text)
 		return false;
 	}
 
-	const auto split = text.find_last_of(" \t>+~");
-	//tokenize(text, tokens, "", " \t>+~", "()");
+	const auto split = find_last_combinator(text);
 
 	if (split == std::string::npos)
 	{
 		m_right.parse(trim_lower(text));
+		return true;
 	}
-	else
+
+	m_right.parse(trim_lower(text.substr(split + 1)));
+
+	// The combinator is whatever sits in the run of whitespace and operator
+	// characters between the two compounds, so "a>b" and "a > b" agree.
+	auto left = text.substr(0, split + 1);
+
+	while (!left.empty())
 	{
-		m_right.parse(trim_lower(text.substr(split + 1)));
+		const auto c = left.back();
 
-		switch (text[split])
+		if (c == '>') m_combinator = combinator_child;
+		else if (c == '+') m_combinator = combinator_adjacent_sibling;
+		else if (c == '~') m_combinator = combinator_general_sibling;
+		else if (c != ' ' && c != '\t') break;
+
+		left.pop_back();
+	}
+
+	if (!left.empty())
+	{
+		m_left = std::make_shared<css_selector>(nullptr, std::shared_ptr<media_query_list>());
+
+		if (!m_left->parse(trim_lower(left)))
 		{
-		case '>':
-			m_combinator = combinator_child;
-			break;
-		case '+':
-			m_combinator = combinator_adjacent_sibling;
-			break;
-		case '~':
-			m_combinator = combinator_general_sibling;
-			break;
-		default:
-			m_combinator = combinator_descendant;
-			break;
-		}
-
-		if (split > 0)
-		{
-			const auto left = trim_lower(text.substr(0, split));
-
-			if (!left.empty())
-			{
-				m_left = std::make_shared<css_selector>(nullptr, std::shared_ptr<media_query_list>());
-
-				if (!m_left->parse(left))
-				{
-					return false;
-				}
-			}
+			return false;
 		}
 	}
 
@@ -1725,8 +1737,7 @@ void css::parse_atrule(const std::string& text, const std::string& baseurl, docu
 			iStr.erase(iStr.length() - 1);
 		}
 		trim(iStr);
-		auto tokens = split_string(iStr, " ", "(\"");
-		//tokenize(iStr, tokens, " ", "", "()\"");
+		auto tokens = split_string(iStr, " ");
 		if (!tokens.empty())
 		{
 			auto url = parse_css_url(tokens.front());
@@ -2019,35 +2030,36 @@ void render_win32::fill_ellipse(const int x, const int y, const int width, const
 }
 
 void render_win32::fill_rect(const int x, const int y, const int width, const int height, const web_color& color,
-                             const css_border_radius& radius)
+                             const css_border_radius& /*radius*/)
 {
+	// Corners are cascaded and measured but not yet painted rounded.
 	_ctx->fill_solid_rect(x, y, width, height, to_pf_color(color));
 }
 
 
-void render_win32::draw_borders(const css_borders& borders, const position& draw_pos, bool root)
+void render_win32::draw_borders(const css_borders& borders, const position& draw_pos, bool /*root*/)
 {
 	apply_clip();
 
 	if (borders.left.width.val() != 0 && borders.left.style > border_style_hidden)
 	{
-		const int w = borders.left.width.val();
+		const int w = round_f(borders.left.width.val());
 		_ctx->fill_solid_rect(draw_pos.left(), draw_pos.top(), w, draw_pos.height, to_pf_color(borders.left.color));
 	}
 	if (borders.right.width.val() != 0 && borders.right.style > border_style_hidden)
 	{
-		const int w = borders.right.width.val();
+		const int w = round_f(borders.right.width.val());
 		_ctx->fill_solid_rect(draw_pos.right() - w, draw_pos.top(), w, draw_pos.height,
 		                      to_pf_color(borders.right.color));
 	}
 	if (borders.top.width.val() != 0 && borders.top.style > border_style_hidden)
 	{
-		const int h = borders.top.width.val();
+		const int h = round_f(borders.top.width.val());
 		_ctx->fill_solid_rect(draw_pos.left(), draw_pos.top(), draw_pos.width, h, to_pf_color(borders.top.color));
 	}
 	if (borders.bottom.width.val() != 0 && borders.bottom.style > border_style_hidden)
 	{
-		const int h = borders.bottom.width.val();
+		const int h = round_f(borders.bottom.width.val());
 		_ctx->fill_solid_rect(draw_pos.left(), draw_pos.bottom() - h, draw_pos.width, h,
 		                      to_pf_color(borders.bottom.color));
 	}
