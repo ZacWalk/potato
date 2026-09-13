@@ -1,0 +1,15 @@
+{
+  "directory": "C:\\code\\apps\\potato\\build\\release",
+  "root": "C:\\code\\apps\\potato",
+  "mapping": {
+    "test": "release",
+    "configure": "release",
+    "build": "release"
+  },
+  "files": {
+    "C:\\code\\apps\\potato\\CMakePresets.json": "36A76FC62ADBEB80348B5D8907845CA4881C68DD6CF3FA10B72C820D960F7DF3"
+  },
+  "manifestHash": "B3464398620388981F672741B43B151500CA3DBDA311A40181E4939141CD4970",
+  "generator": "Ninja",
+  "multiConfig": false
+}

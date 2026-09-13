@@ -1,239 +1,12 @@
-// document.cpp - WinHTTP async downloads, HTML entity table, parser with
-// implicit tag closing, document rendering, font caching via GDI+, and
-// stylesheet application.
+// document.cpp - HTML entity table, the parser with implicit tag closing,
+// document rendering, font caching through webvis::host, stylesheet
+// application, and the headless layout harness plus its tests.
 
 #include "pch.h"
 #include "document.h"
-// ui.h removed: document.cpp now uses view_host + dispatch_to_ui/async from core.h
 
-namespace
+namespace webvis
 {
-	std::string svg_attribute(const std::string& tag, const std::string& name)
-	{
-		size_t pos = 0;
-		while ((pos = tag.find(name, pos)) != std::string::npos)
-		{
-			const bool valid_start = pos == 0 || isspace(static_cast<unsigned char>(tag[pos - 1]));
-			size_t equals = pos + name.size();
-			while (equals < tag.size() && isspace(static_cast<unsigned char>(tag[equals]))) ++equals;
-			if (!valid_start || equals >= tag.size() || tag[equals] != '=')
-			{
-				pos += name.size();
-				continue;
-			}
-
-			++equals;
-			while (equals < tag.size() && isspace(static_cast<unsigned char>(tag[equals]))) ++equals;
-			if (equals >= tag.size()) return {};
-
-			const char quote = tag[equals];
-			if (quote == '\'' || quote == '"')
-			{
-				const auto end = tag.find(quote, equals + 1);
-				return end == std::string::npos ? std::string{} : tag.substr(equals + 1, end - equals - 1);
-			}
-
-			const auto end = tag.find_first_of(" \t\r\n>", equals);
-			return tag.substr(equals, end - equals);
-		}
-		return {};
-	}
-
-	double svg_number(const std::string& value)
-	{
-		if (value.empty() || value.find('%') != std::string::npos) return 0;
-		char* end = nullptr;
-		const double result = std::strtod(value.c_str(), &end);
-		return end != value.c_str() && result > 0 ? result : 0;
-	}
-
-	pf::bitmap_ptr create_svg_placeholder(const std::string& text)
-	{
-		std::string lower = text.substr(0, std::min<size_t>(text.size(), 8192));
-		transform_text(lower, text_transform_lowercase);
-		const auto svg_start = lower.find("<svg");
-		if (svg_start == std::string::npos) return nullptr;
-		const auto svg_end = lower.find('>', svg_start + 4);
-		if (svg_end == std::string::npos) return nullptr;
-
-		const auto tag = lower.substr(svg_start, svg_end - svg_start + 1);
-		double width = svg_number(svg_attribute(tag, "width"));
-		double height = svg_number(svg_attribute(tag, "height"));
-
-		double view_width = 0;
-		double view_height = 0;
-		const auto view_box = svg_attribute(tag, "viewbox");
-		if (!view_box.empty())
-		{
-			const char* cursor = view_box.c_str();
-			for (int part = 0; part < 4; ++part)
-			{
-				while (*cursor && (isspace(static_cast<unsigned char>(*cursor)) || *cursor == ',')) ++cursor;
-				char* end = nullptr;
-				const double value = std::strtod(cursor, &end);
-				if (end == cursor) break;
-				if (part == 2) view_width = value;
-				if (part == 3) view_height = value;
-				cursor = end;
-			}
-		}
-
-		if (width <= 0) width = view_width;
-		if (height <= 0) height = view_height;
-		if (width <= 0 && height > 0 && view_width > 0 && view_height > 0)
-			width = height * view_width / view_height;
-		if (height <= 0 && width > 0 && view_width > 0 && view_height > 0)
-			height = width * view_height / view_width;
-		if (width <= 0) width = 300;
-		if (height <= 0) height = 150;
-
-		const int bitmap_width = std::clamp(static_cast<int>(width + 0.5), 1, 2048);
-		const int bitmap_height = std::clamp(static_cast<int>(height + 0.5), 1, 2048);
-		std::vector<uint32_t> pixels(static_cast<size_t>(bitmap_width) * bitmap_height, 0xffeeeeee);
-		const auto set_pixel = [&](const int x, const int y, const uint32_t color)
-		{
-			pixels[static_cast<size_t>(y) * bitmap_width + x] = color;
-		};
-
-		for (int x = 0; x < bitmap_width; ++x)
-		{
-			set_pixel(x, 0, 0xff999999);
-			set_pixel(x, bitmap_height - 1, 0xff999999);
-		}
-		for (int y = 0; y < bitmap_height; ++y)
-		{
-			set_pixel(0, y, 0xff999999);
-			set_pixel(bitmap_width - 1, y, 0xff999999);
-			const int diagonal = bitmap_height > 1
-				                     ? y * (bitmap_width - 1) / (bitmap_height - 1)
-				                     : 0;
-			set_pixel(diagonal, y, 0xffbbbbbb);
-			set_pixel(bitmap_width - 1 - diagonal, y, 0xffbbbbbb);
-		}
-
-		return std::make_shared<pf::bitmap>(bitmap_width, bitmap_height, std::move(pixels));
-	}
-}
-
-
-// Async HTTP — wraps pf::async_http_session to download to a temp file and
-// then deliver a single completion callback (file_path, error, status, url).
-
-bool http::open(const std::string_view user_agent)
-{
-	m_session = pf::create_async_http_session(user_agent);
-	return static_cast<bool>(m_session);
-}
-
-void http::close()
-{
-	stop();
-	m_session.reset();
-}
-
-void http::stop()
-{
-	std::vector<std::shared_ptr<http_request>> snapshot;
-	{
-		std::lock_guard lk(m_mutex);
-		snapshot = m_requests;
-	}
-	for (const auto& r : snapshot) r->cancel();
-	if (m_session) m_session->stop();
-}
-
-bool http::download_file(const std::string& url_in, const std::shared_ptr<http_request>& request)
-{
-	if (!request || !m_session) return false;
-
-	std::string url = url_in;
-	if (!starts(url, "http://") && !starts(url, "https://"))
-	{
-		url = "https://" + url;
-	}
-
-	const std::string temp_path = pf::platform_temp_file_path("pot");
-	auto file = pf::open_file_for_write(pf::file_path(temp_path));
-	if (!file)
-	{
-		pf::platform_delete_file(pf::file_path(temp_path));
-		return false;
-	}
-
-	{
-		std::lock_guard lk(m_mutex);
-		m_requests.push_back(request);
-	}
-
-	struct ctx_t
-	{
-		std::shared_ptr<http_request> req;
-		pf::writable_file_handle_ptr file;
-		std::string file_path;
-		std::string url;
-		http* parent = nullptr;
-		std::atomic<int> status_code{0};
-		std::atomic<bool> done{false};
-	};
-	auto ctx = std::make_shared<ctx_t>();
-	ctx->req = request;
-	ctx->file = std::move(file);
-	ctx->file_path = temp_path;
-	ctx->url = url;
-	ctx->parent = this;
-
-	pf::async_http_callbacks cb;
-	cb.on_headers = [ctx](const int status, std::string, uint64_t)
-	{
-		ctx->status_code = status;
-	};
-	cb.on_data = [ctx](const uint8_t* data, const size_t size)
-	{
-		if (ctx->file) ctx->file->write(data, static_cast<uint32_t>(size));
-	};
-	auto finish = [ctx](uint32_t error)
-	{
-		if (ctx->done.exchange(true)) return;
-		ctx->file.reset();
-		auto cb_user = ctx->req->m_callback;
-		auto file_path = ctx->file_path;
-		auto url_capture = ctx->url;
-		auto status = static_cast<uint32_t>(ctx->status_code.load());
-		auto* parent = ctx->parent;
-		auto req = ctx->req;
-		// Remove the request from the parent http synchronously while we still
-		// know the parent is alive (this callback fires on the http worker
-		// thread, which the parent's destructor waits on via stop()).
-		if (parent)
-		{
-			std::lock_guard lk(parent->m_mutex);
-			std::erase(parent->m_requests, req);
-		}
-		dispatch_to_ui([cb_user = std::move(cb_user), file_path = std::move(file_path),
-				error, status, url_capture = std::move(url_capture), req]()
-			{
-				if (cb_user) cb_user(file_path, error, status, url_capture);
-				// The callback reads the body synchronously, so the download's
-				// scratch file has no readers left once it returns.
-				pf::platform_delete_file(pf::file_path(file_path));
-			});
-	};
-	cb.on_complete = [finish]() { finish(0); };
-	cb.on_error = [finish](std::string) { finish(1); };
-
-	auto async = m_session->get(url, std::move(cb));
-	if (!async)
-	{
-		ctx->file.reset();
-		pf::platform_delete_file(pf::file_path(temp_path));
-		std::lock_guard lk(m_mutex);
-		std::erase(m_requests, request);
-		return false;
-	}
-	request->set_async(std::move(async));
-	return true;
-}
-
 
 html_entities g_html_entities[] =
 {
@@ -624,7 +397,7 @@ bool html_scanner::decode_entity(std::string& out)
 		{
 			if (p < m_src.size() && m_src[p] == ';') ++p;
 			m_pos = p;
-			pf::char32_to_utf8(std::back_inserter(out), cp);
+			char32_to_utf8(std::back_inserter(out), cp);
 			return true;
 		}
 	}
@@ -639,7 +412,7 @@ bool html_scanner::decode_entity(std::string& out)
 			{
 				if (p < m_src.size() && m_src[p] == ';') ++p;
 				m_pos = p;
-				pf::char32_to_utf8(std::back_inserter(out), cp);
+				char32_to_utf8(std::back_inserter(out), cp);
 				return true;
 			}
 		}
@@ -1123,17 +896,17 @@ namespace
 
 		void diagnostic(const std::string& message) override
 		{
-			if (verbose) pf::write_stdout("  " + message + "\n");
+			if (verbose) std::cout << "  " << message << "\n";
 		}
 
 		void resource_started(const std::string& type, const std::string& url) override
 		{
-			if (verbose) pf::write_stdout(std::format("  {} requested: {}\n", type, url));
+			if (verbose) std::cout << std::format("  {} requested: {}\n", type, url);
 		}
 
 		void resource_finished(const std::string& type, const std::string& url, const bool ok) override
 		{
-			if (verbose) pf::write_stdout(std::format("  {} {}: {}\n", type, ok ? "loaded" : "failed", url));
+			if (verbose) std::cout << std::format("  {} {}: {}\n", type, ok ? "loaded" : "failed", url);
 		}
 	};
 }
@@ -1850,14 +1623,12 @@ void parser::parse_open_omitted_start(const std::string_view tag)
 }
 
 
-document::document(view_host& v) : m_view(v), m_over_element(nullptr)
+document::document(view_host& v) : m_view(v), m_host(*current_host()), m_over_element(nullptr)
 {
-	m_http.open("potato/1.0");
 }
 
 document::~document()
 {
-	m_http.stop();
 	clear();
 
 	std::lock_guard lock(m_fonts_mutex);
@@ -1865,7 +1636,7 @@ document::~document()
 	{
 		if (fi.font)
 		{
-			pf::delete_font_handle(fi.font);
+			m_host.destroy_font(fi.font);
 			fi.font = 0;
 		}
 	}
@@ -1954,7 +1725,7 @@ std::shared_ptr<document> document::create_from_bytes(view_host& view, const std
 
 	view.diagnostic("HTML parse completed");
 
-	doc->load_master_stylesheet(load_resource_html("master.css"));
+	doc->load_master_stylesheet(std::string(master_stylesheet()));
 	doc->set_root(par.release_root());
 
 	return doc;
@@ -2027,11 +1798,11 @@ void document::request_restyle()
 	});
 }
 
-pf::font_handle document::add_font(const std::string& name_in, int size, const std::string& weight,
+font_handle document::add_font(const std::string& name_in, int size, const std::string& weight,
                                    const std::string& style,
                                    const std::string& decoration, font_metrics* fm)
 {
-	pf::font_handle ret = 0;
+	font_handle ret = 0;
 	auto name = name_in;
 
 	if (name.empty() || is_equal(name.c_str(), "inherit"))
@@ -2116,7 +1887,7 @@ pf::font_handle document::add_font(const std::string& name_in, int size, const s
 
 		const auto fonts = split_string(name, ',');
 
-		pf::font_def def;
+		font_desc def;
 		def.face = fonts.empty() ? get_default_font_name() : fonts.front();
 		def.size = size;
 		def.weight = fw;
@@ -2124,8 +1895,8 @@ pf::font_handle document::add_font(const std::string& name_in, int size, const s
 		def.underline = (decor & font_decoration_underline) != 0;
 		def.strikeout = (decor & font_decoration_linethrough) != 0;
 
-		pf::font_metrics_data m{};
-		fi.font = pf::create_font_handle(def, &m);
+		font_metrics m{};
+		fi.font = m_host.create_font(def, &m);
 
 		fi.metrics.height = m.height;
 		fi.metrics.x_height = m.x_height;
@@ -2140,7 +1911,7 @@ pf::font_handle document::add_font(const std::string& name_in, int size, const s
 			const auto it = m_fonts.find(key);
 			if (it != m_fonts.end())
 			{
-				if (fi.font) pf::delete_font_handle(fi.font);
+				if (fi.font) m_host.destroy_font(fi.font);
 				fi = it->second;
 			}
 			else
@@ -2158,7 +1929,7 @@ pf::font_handle document::add_font(const std::string& name_in, int size, const s
 	return ret;
 }
 
-pf::font_handle document::get_font(const std::string& name_in, int size, const std::string& weight,
+font_handle document::get_font(const std::string& name_in, int size, const std::string& weight,
                                    const std::string& style,
                                    const std::string& decoration, font_metrics* fm)
 {
@@ -2218,7 +1989,7 @@ int document::render(const int max_width, const render_type rt)
 	return ret;
 }
 
-void document::draw(render_win32& renderer, const int x, const int y, const position* clip)
+void document::draw(renderer& renderer, const int x, const int y, const position* clip)
 {
 	if (m_root)
 	{
@@ -2268,19 +2039,19 @@ int document::cvt_units(css_length& val, const int fontSize, const int size)
 		val.set_value(static_cast<float>(ret), css_units_px);
 		break;
 	case css_units_vw:
-		ret = round_f(val.val() * pf::platform_screen_size().cx / 100.0f);
+		ret = round_f(val.val() * viewport_size().width / 100.0f);
 		val.set_value(static_cast<float>(ret), css_units_px);
 		break;
 	case css_units_vh:
-		ret = round_f(val.val() * pf::platform_screen_size().cy / 100.0f);
+		ret = round_f(val.val() * viewport_size().height / 100.0f);
 		val.set_value(static_cast<float>(ret), css_units_px);
 		break;
 	case css_units_vmin:
-		ret = round_f(val.val() * std::min(pf::platform_screen_size().cx, pf::platform_screen_size().cy) / 100.0f);
+		ret = round_f(val.val() * std::min(viewport_size().width, viewport_size().height) / 100.0f);
 		val.set_value(static_cast<float>(ret), css_units_px);
 		break;
 	case css_units_vmax:
-		ret = round_f(val.val() * std::max(pf::platform_screen_size().cx, pf::platform_screen_size().cy) / 100.0f);
+		ret = round_f(val.val() * std::max(viewport_size().width, viewport_size().height) / 100.0f);
 		val.set_value(static_cast<float>(ret), css_units_px);
 		break;
 	case css_units_pt:
@@ -2803,7 +2574,7 @@ void document::set_base_url(const std::string& base_url)
 		}
 		else
 		{
-			m_base_path = pf::resolve_url(m_url, base_url);
+			m_base_path = m_host.resolve_url(m_url, base_url);
 		}
 	}
 	else
@@ -2841,43 +2612,33 @@ void document::import_css(const std::string& url, const std::string& baseurl, co
 	auto pThis = shared_from_this();
 	m_view.resource_started("stylesheet", css_url);
 
-	m_http.download_file(css_url, std::make_shared<http_request>(
-		                     [pThis, css_url, media](const std::string& file_name, const uint32_t error,
-		                                             const uint32_t httpStatus,
-		                                             const std::string& /*reqUrl*/)
+	m_host.load_resource(resource_kind::stylesheet, css_url,
+	                     [pThis, css_url, media](resource_result result)
+	                     {
+		                     if (!result.ok || result.text.empty())
 		                     {
-			                     if (error || httpStatus >= 400)
-			                     {
-				                     pThis->m_view.resource_finished("stylesheet", css_url, false);
-				                     return;
-			                     }
-			                     const auto css_text = get_file_contents(file_name);
-			                     if (css_text.empty())
-			                     {
-				                     pThis->m_view.resource_finished("stylesheet", css_url, false);
-				                     return;
-			                     }
-			                     pThis->m_view.diagnostic(std::format(
-				                     "Stylesheet downloaded: {} bytes, HTTP {}: {}",
-				                     css_text.size(), httpStatus, css_url));
+			                     pThis->m_view.resource_finished("stylesheet", css_url, false);
+			                     return;
+		                     }
 
-			                     dispatch_to_ui([pThis, css_url, css_text, media]()
-			                     {
-				                     const auto selectors_before = pThis->m_styles.selectors().size();
-				                     pThis->add_stylesheet(css_text, css_url, media);
-				                     pThis->m_styles.sort_selectors();
-				                     pThis->m_view.diagnostic(std::format(
-					                     "Stylesheet parsed: {} selectors added, {} total: {}",
-					                     pThis->m_styles.selectors().size() - selectors_before,
-					                     pThis->m_styles.selectors().size(), css_url));
+		                     const auto css_text = std::move(result.text);
+		                     pThis->m_view.diagnostic(std::format(
+			                     "Stylesheet downloaded: {} bytes: {}", css_text.size(), css_url));
 
-				                     if (pThis->m_root)
-				                     {
-					                     pThis->request_restyle();
-				                     }
-				                     pThis->m_view.resource_finished("stylesheet", css_url, true);
-			                     });
-		                     }));
+		                     const auto selectors_before = pThis->m_styles.selectors().size();
+		                     pThis->add_stylesheet(css_text, css_url, media);
+		                     pThis->m_styles.sort_selectors();
+		                     pThis->m_view.diagnostic(std::format(
+			                     "Stylesheet parsed: {} selectors added, {} total: {}",
+			                     pThis->m_styles.selectors().size() - selectors_before,
+			                     pThis->m_styles.selectors().size(), css_url));
+
+		                     if (pThis->m_root)
+		                     {
+			                     pThis->request_restyle();
+		                     }
+		                     pThis->m_view.resource_finished("stylesheet", css_url, true);
+	                     });
 }
 
 void document::on_anchor_click(const std::string& url, element* el)
@@ -2902,40 +2663,32 @@ void document::load_image(const std::string& url, const std::string& base)
 		m_images[image_url] = nullptr; // Indicate loading
 		m_view.resource_started("image", image_url);
 
-		m_http.download_file(image_url, std::make_shared<http_request>(
-			                     [pThis, image_url](const std::string& file_name, const uint32_t error,
-			                                        const uint32_t httpStatus, const std::string& reqUrl)
+		m_host.load_resource(resource_kind::image, image_url,
+		                     [pThis, image_url](resource_result result)
+		                     {
+			                     if (!result.ok || !result.image)
 			                     {
-				                     if (error || httpStatus >= 400)
-				                     {
-					                     pThis->m_view.resource_finished("image", image_url, false);
-					                     return;
-				                     }
-				                     auto image = pf::load_bitmap_file(pf::file_path(file_name));
-				                     if (!image)
-				                     {
-					                     image = create_svg_placeholder(get_file_contents(file_name));
-					                     if (image)
-					                     {
-						                     pThis->m_view.diagnostic(std::format(
-							                     "SVG placeholder: {}x{}: {}", image->width, image->height,
-							                     image_url));
-					                     }
-				                     }
-				                     pThis->m_images[image_url] = std::move(image);
-				                     pThis->m_view.resource_finished(
-					                     "image", image_url, pThis->m_images[image_url] != nullptr);
-				                     pThis->m_view.layout();
-			                     }));
+				                     pThis->m_view.resource_finished("image", image_url, false);
+				                     return;
+			                     }
+
+			                     const auto dim = result.image->dimensions();
+			                     pThis->m_view.diagnostic(std::format(
+				                     "Image loaded: {}x{}: {}", dim.width, dim.height, image_url));
+
+			                     pThis->m_images[image_url] = std::move(result.image);
+			                     pThis->m_view.resource_finished("image", image_url, true);
+			                     pThis->m_view.layout();
+		                     });
 	}
 }
 
-pf::bitmap_ptr document::find_image(const std::string& url)
+image_ptr document::find_image(const std::string& url)
 {
 	return find_image(url, m_base_path);
 }
 
-pf::bitmap_ptr document::find_image(const std::string& url, const std::string& base)
+image_ptr document::find_image(const std::string& url, const std::string& base)
 {
 	const auto image_url = make_url(url, base.empty() ? m_base_path : base);
 	const auto found = m_images.find(image_url);
@@ -2949,21 +2702,21 @@ bool document::is_image_cached(const std::string& src, const std::string& baseur
 }
 
 
-int document::text_width(const std::string_view text, const pf::font_handle hFont)
+int document::text_width(const std::string_view text, const font_handle hFont)
 {
-	return pf::measure_text_with_font(hFont, text).cx;
+	return m_host.text_width(hFont, text);
 }
 
 int document::pt_to_px(const int pt)
 {
-	return pt * pf::platform_screen_dpi() / 72;
+	return pt * viewport_dpi() / 72;
 }
 
 
 void document::get_media_features(media_features& media)
 {
-	const auto dpi = pf::platform_screen_dpi();
-	const auto sz = pf::platform_screen_size();
+	const auto dpi = viewport_dpi();
+	const auto sz = viewport_size();
 
 	media.type = media_type_screen;
 	media.width = m_client_pos.width;
@@ -2972,6 +2725,8 @@ void document::get_media_features(media_features& media)
 	media.monochrome = 0;
 	media.color_index = 256;
 	media.resolution = dpi;
-	media.device_width = sz.cx;
-	media.device_height = sz.cy;
+	media.device_width = sz.width;
+	media.device_height = sz.height;
 }
+
+} // namespace webvis

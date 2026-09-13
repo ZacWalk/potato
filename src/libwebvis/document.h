@@ -1,69 +1,16 @@
-// document.h - Async HTTP client (WinHTTP), HTML scanner/tokenizer, HTML parser
-// with implicit tag closing, and the document model that owns the DOM tree and
-// manages fonts and stylesheets.
+// document.h - HTML scanner/tokenizer, HTML parser with implicit tag closing,
+// and the document model that owns the DOM tree and manages fonts and
+// stylesheets. Resources are fetched through webvis::host, so nothing here
+// knows about sockets or files.
 
 #pragma once
-#include "platform.h"
 #include "core.h"
 #include "element.h"
 
+namespace webvis
+{
 
 class document;
-
-// File-callback wrapper. Each request downloads to a temp file and then
-// invokes a single completion callback with (file_path, error_code, http_status, url).
-// The implementation rides on top of pf::async_http_session.
-class http_request : public std::enable_shared_from_this<http_request>
-{
-public:
-	using callback_t = std::function<void(const std::string& file, uint32_t error, uint32_t httpStatus,
-	                                      const std::string& url)>;
-
-	explicit http_request(callback_t callback) : m_callback(std::move(callback))
-	{
-	}
-
-	~http_request() = default;
-
-	void cancel()
-	{
-		std::lock_guard lk(m_mutex);
-		if (m_async) m_async->cancel();
-	}
-
-	// Internal — set by http when the request is launched.
-	void set_async(pf::async_http_request_ptr a)
-	{
-		std::lock_guard lk(m_mutex);
-		m_async = std::move(a);
-	}
-
-	callback_t m_callback;
-	std::mutex m_mutex;
-	pf::async_http_request_ptr m_async;
-};
-
-// Async HTTP — owns a pf::async_http_session and tracks in-flight requests
-// so they can be cancelled together at shutdown.
-class http
-{
-	pf::async_http_session_ptr m_session;
-	std::mutex m_mutex;
-	std::vector<std::shared_ptr<http_request>> m_requests;
-
-public:
-	http() = default;
-	~http() { close(); }
-
-	http(const http&) = delete;
-	http& operator=(const http&) = delete;
-
-	bool open(std::string_view user_agent);
-	bool download_file(const std::string& url, const std::shared_ptr<http_request>& request);
-	void stop();
-	void close();
-};
-
 
 //| 
 //| simple and fast XML/HTML scanner/tokenizer
@@ -75,7 +22,7 @@ public:
 struct html_entities
 {
 	char szCode[20];
-	wchar_t Code;
+	char32_t Code;
 };
 
 extern html_entities g_html_entities[];
@@ -191,7 +138,7 @@ private:
 };
 
 
-class render_win32;
+class renderer;
 class element;
 
 
@@ -233,6 +180,7 @@ struct layout_stats
 class document : public std::enable_shared_from_this<document>
 {
 	view_host& m_view;
+	host& m_host;
 
 	std::shared_ptr<element> m_root;
 	std::map<std::string, font_item, ltstr> m_fonts;
@@ -246,7 +194,6 @@ class document : public std::enable_shared_from_this<document>
 	std::vector<std::shared_ptr<media_query_list>> m_media_lists;
 	element* m_over_element;
 
-	http m_http;
 	std::string m_source; // decoded UTF-8 page text; the DOM points into this
 	std::string m_url;
 	std::string m_caption;
@@ -256,7 +203,7 @@ class document : public std::enable_shared_from_this<document>
 	// UI thread only: set while a coalesced restyle is already queued.
 	bool m_restyle_pending = false;
 
-	std::map<std::string, pf::bitmap_ptr, ltstr> m_images;
+	std::map<std::string, image_ptr, ltstr> m_images;
 
 public:
 	document(view_host& view);
@@ -264,10 +211,10 @@ public:
 
 	void clear();
 	void load_master_stylesheet(const std::string& str);
-	pf::font_handle get_font(const std::string& name, int size, const std::string& weight, const std::string& style,
-	                         const std::string& decoration, font_metrics* fm);
+	font_handle get_font(const std::string& name, int size, const std::string& weight, const std::string& style,
+	                     const std::string& decoration, font_metrics* fm);
 	int render(int max_width, render_type rt = render_all);
-	void draw(render_win32& renderer, int x, int y, const position* clip);
+	void draw(renderer& r, int x, int y, const position* clip);
 
 	web_color get_def_color() { return m_def_color; }
 
@@ -302,10 +249,10 @@ public:
 
 	bool is_image_cached(const std::string& src, const std::string& baseurl);
 	void load_image(const std::string& url, const std::string& base);
-	pf::bitmap_ptr find_image(const std::string& url);
-	pf::bitmap_ptr find_image(const std::string& url, const std::string& base);
+	image_ptr find_image(const std::string& url);
+	image_ptr find_image(const std::string& url, const std::string& base);
 
-	int text_width(std::string_view text, pf::font_handle hFont);
+	int text_width(std::string_view text, font_handle hFont);
 
 
 	position client_pos() const { return m_client_pos; };
@@ -335,8 +282,8 @@ public:
 	friend class html_view;
 
 private:
-	pf::font_handle add_font(const std::string& name, int size, const std::string& weight, const std::string& style,
-	                         const std::string& decoration, font_metrics* fm);
+	font_handle add_font(const std::string& name, int size, const std::string& weight, const std::string& style,
+	                     const std::string& decoration, font_metrics* fm);
 
 	bool update_media_lists(const media_features& features);
 	void update_styles(element* root_el);
@@ -408,3 +355,5 @@ public:
 	void parse_close_omitted_end(std::string_view tag);
 	void parse_open_omitted_start(std::string_view tag);
 };
+
+} // namespace webvis

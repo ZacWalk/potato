@@ -1,14 +1,14 @@
-// core.h - Foundational types and utilities: geometry (position, recti, size_i),
-// CSS enums, css_length with calc() support, web_color, string helpers, and
-// font metrics. Included by all other headers.
+// core.h - Foundational types and utilities: CSS enums, css_length with calc()
+// support, string helpers and the unit-test harness. The geometry, colour and
+// font-metric types shared with the host live in webvis.h. Included by all
+// other headers.
 
 #pragma once
 
 #include <cstdint>
 #include <cstdarg>
 
-
-using byte = uint8_t;
+#include "webvis.h"
 
 namespace sizing
 {
@@ -23,151 +23,35 @@ namespace sizing
 #define countof(dt) sizeof(::sizing::lengthof_impl(dt))
 }
 
+namespace webvis
+{
 
 class document;
 class element;
 
-// View host abstract interface (implemented by html_view in ui.h). Allows the
-// document layer to invoke layout/invalidate without depending on Win32.
-class view_host
+// Screen metrics, read through the host. These are inline helpers because the
+// CSS viewport units are resolved deep inside value parsing, far from any
+// document instance.
+inline webvis::size viewport_size()
 {
-public:
-	virtual ~view_host() = default;
-	virtual void layout() = 0;
-	virtual void invalidate() = 0;
-	virtual void open(const std::string& url) = 0;
+	const auto h = current_host();
+	return h ? h->screen_size() : webvis::size{};
+}
 
-	virtual void diagnostic(const std::string&)
-	{
-	}
-
-	virtual void resource_started(const std::string&, const std::string&)
-	{
-	}
-
-	virtual void resource_finished(const std::string&, const std::string&, bool)
-	{
-	}
-};
-
-// UI thread dispatch. Implemented in main.cpp and forwards to the platform
-// layer's task queue, so document.cpp / core.cpp need not include it.
-void dispatch_to_ui(std::function<void()> fn);
+inline int viewport_dpi()
+{
+	const auto h = current_host();
+	return h ? h->screen_dpi() : 96;
+}
 
 constexpr unsigned int font_decoration_none = 0x00;
 constexpr unsigned int font_decoration_underline = 0x01;
 constexpr unsigned int font_decoration_linethrough = 0x02;
 constexpr unsigned int font_decoration_overline = 0x04;
 
-using byte = unsigned char;
-
-struct margins
-{
-	int left = 0;
-	int right = 0;
-	int top = 0;
-	int bottom = 0;
-
-	int width() const { return left + right; }
-	int height() const { return top + bottom; }
-};
-
-struct size
-{
-	int width = 0;
-	int height = 0;
-};
-
-struct position
-{
-	using vector = std::vector<position>;
-
-	int x = 0;
-	int y = 0;
-	int width = 0;
-	int height = 0;
-
-	position() = default;
-
-	position(const int x, const int y, const int width, const int height)
-		: x(x), y(y), width(width), height(height)
-	{
-	}
-
-	int right() const { return x + width; }
-	int bottom() const { return y + height; }
-	int left() const { return x; }
-	int top() const { return y; }
-
-	void operator+=(const margins& mg)
-	{
-		x -= mg.left;
-		y -= mg.top;
-		width += mg.left + mg.right;
-		height += mg.top + mg.bottom;
-	}
-
-	void operator-=(const margins& mg)
-	{
-		x += mg.left;
-		y += mg.top;
-		width -= mg.left + mg.right;
-		height -= mg.top + mg.bottom;
-	}
-
-	void clear()
-	{
-		x = y = width = height = 0;
-	}
-
-	void operator=(const size& sz)
-	{
-		width = sz.width;
-		height = sz.height;
-	}
-
-	void move_to(const int x, const int y)
-	{
-		this->x = x;
-		this->y = y;
-	}
-
-	bool does_intersect(const position* val) const
-	{
-		if (!val) return false;
-
-		return
-			left() <= val->right() &&
-			right() >= val->left() &&
-			bottom() >= val->top() &&
-			top() <= val->bottom();
-	}
-
-	bool empty() const
-	{
-		return width == 0 && height == 0;
-	}
-
-	bool is_point_inside(const int x, const int y) const
-	{
-		return x >= left() && x <= right() && y >= top() && y <= bottom();
-	}
-};
-
-struct font_metrics
-{
-	int height = 0;
-	int ascent = 0;
-	int descent = 0;
-	int x_height = 0;
-	bool draw_spaces = true;
-
-	int base_line() const { return descent; }
-};
-
 struct font_item
 {
-	pf::font_handle font = 0;
+	font_handle font = 0;
 	font_metrics metrics;
 };
 
@@ -1105,25 +989,37 @@ inline bool is_empty(const char* sz)
 	return sz == nullptr || sz[0] == 0;
 }
 
-inline std::wstring to_utf16(const char* sz)
-{
-	if (!sz || !*sz) return std::wstring();
-	return pf::utf8_to_utf16(std::string_view(sz));
-}
-
-inline std::wstring to_utf16(const std::string& str)
-{
-	return pf::utf8_to_utf16(str);
-}
-
-inline std::string to_utf8(const std::wstring& wstr)
-{
-	return pf::utf16_to_utf8(wstr);
-}
-
 inline int clamp(const int v, const int l, const int r)
 {
 	return std::clamp(v, l, r);
+}
+
+// Appends a code point to `inserter` as UTF-8.
+template <typename output_it>
+void char32_to_utf8(output_it&& inserter, const uint32_t ch)
+{
+	if (ch < 0x80)
+	{
+		*inserter++ = static_cast<char>(ch);
+	}
+	else if (ch < 0x800)
+	{
+		*inserter++ = static_cast<char>(0xC0 | ch >> 6);
+		*inserter++ = static_cast<char>(0x80 | (ch & 0x3F));
+	}
+	else if (ch < 0x10000)
+	{
+		*inserter++ = static_cast<char>(0xE0 | ch >> 12);
+		*inserter++ = static_cast<char>(0x80 | (ch >> 6 & 0x3F));
+		*inserter++ = static_cast<char>(0x80 | (ch & 0x3F));
+	}
+	else
+	{
+		*inserter++ = static_cast<char>(0xF0 | ch >> 18);
+		*inserter++ = static_cast<char>(0x80 | (ch >> 12 & 0x3F));
+		*inserter++ = static_cast<char>(0x80 | (ch >> 6 & 0x3F));
+		*inserter++ = static_cast<char>(0x80 | (ch & 0x3F));
+	}
 }
 
 inline int safe_stoi(const std::string& str, const int def = 0)
@@ -1229,7 +1125,8 @@ inline bool starts(const std::string& text, const char* with)
 
 inline std::string make_url(const std::string& url, const std::string& basepath)
 {
-	return pf::resolve_url(basepath, url);
+	const auto h = current_host();
+	return h ? h->resolve_url(basepath, url) : url;
 }
 
 inline void transform_text(std::string& text, const text_transform tt)
@@ -1363,56 +1260,6 @@ std::vector<std::string> split_string(const std::string& str, char delim = ' ');
 std::vector<std::string> split_string(const std::string& str, const char* delims, const char* quote = "\"");
 
 
-struct web_color
-{
-	byte blue;
-	byte green;
-	byte red;
-	byte alpha;
-
-	web_color(const byte r, const byte g, const byte b, const byte a = 255)
-	{
-		blue = b;
-		green = g;
-		red = r;
-		alpha = a;
-	}
-
-	web_color()
-	{
-		blue = 0;
-		green = 0;
-		red = 0;
-		alpha = 0xFF;
-	}
-
-	web_color(const web_color& val)
-	{
-		blue = val.blue;
-		green = val.green;
-		red = val.red;
-		alpha = val.alpha;
-	}
-
-	web_color& operator=(const web_color& val)
-	{
-		blue = val.blue;
-		green = val.green;
-		red = val.red;
-		alpha = val.alpha;
-		return *this;
-	}
-
-	static web_color from_string(const char* str);
-	static web_color from_string(const std::string& str) { return from_string(str.c_str()); };
-
-	static bool is_color(const char* str);
-	static bool is_color(const std::string& str) { return is_color(str.c_str()); };
-};
-
-
-class document;
-
 struct calc_term
 {
 	float value;
@@ -1520,9 +1367,9 @@ public:
 		case css_units_mm:
 			return value * 96.0f / 25.4f;
 		case css_units_vw:
-			return value * pf::platform_screen_size().cx / 100.0f;
+			return value * viewport_size().width / 100.0f;
 		case css_units_vh:
-			return value * pf::platform_screen_size().cy / 100.0f;
+			return value * viewport_size().height / 100.0f;
 		default:
 			return value;
 		}
@@ -1819,11 +1666,6 @@ struct css_position
 };
 
 
-inline std::string load_resource_html(const std::string_view name)
-{
-	return std::string(pf::embedded_resource_text(name));
-}
-
 inline std::string get_file_contents(const std::string& file_name)
 {
 	std::string result;
@@ -1971,3 +1813,5 @@ void register_scanner_tests(tests& t);
 void register_style_tests(tests& t);
 
 void register_layout_tests(tests& t);
+
+} // namespace webvis

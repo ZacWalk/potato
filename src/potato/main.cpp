@@ -1,15 +1,23 @@
-// main.cpp - Minimal portable application entry. Builds a basic browser
-// frame: a toolbar with back/forward/refresh/home buttons + an address
-// bar across the top, and a blank content area below. The full document
-// rendering pipeline will be wired in subsequent passes.
+// main.cpp - The potato browser: a toolbar with back/forward/refresh/home
+// buttons and an address bar across the top, the rendered document below, the
+// navigation history, and the headless CLI modes. Supplies libwebvis with its
+// device context and host through webvis_host.h.
 
 #include "pch.h"
 #include "platform.h"
+#include "webvis_host.h"
 #include "document.h"
 #include "style.h"
 
+// The engine lives in namespace webvis; the browser is its only consumer here,
+// so it is pulled in wholesale rather than qualified at hundreds of sites.
+using namespace webvis;
+
 namespace
 {
+	// The one host instance, handed to libwebvis before any document exists.
+	potato_host g_host;
+
 	// ── Content area ──────────────────────────────────────────────────────
 	// Reactor for the blank content child window. Paints a white background
 	// and centres a placeholder label.
@@ -386,7 +394,8 @@ namespace
 			const int layout_w = _last_layout_width;
 			const position client_pos(0, 0, layout_w, _viewport_h);
 			_doc->client_pos(client_pos);
-			render_win32 renderer(dc, client_pos);
+			potato_device_context device(dc);
+			renderer renderer(device, client_pos);
 
 			// Draw document translated by -scroll_y. The clip is in the same
 			// (translated) space as the positions element::draw tests against.
@@ -911,7 +920,10 @@ namespace
 
 // Defined in core.cpp — runs the registered in-process unit tests and
 // returns an HTML report. Failed cases contain the substring "FAILED".
-extern std::string run_tests();
+namespace webvis
+{
+	extern std::string run_tests();
+}
 
 namespace
 {
@@ -1121,6 +1133,11 @@ app_init_result app_init(const pf::window_frame_ptr& main_frame,
 	r.start_gui = true;
 	r.exit_code = 0;
 
+	// libwebvis reaches the machine through this host, so it has to be in
+	// place before anything creates a document — including the CLI modes.
+	webvis::set_host(&g_host);
+	g_host.open_network("potato/1.0");
+
 	std::string eval_url;
 	std::string startup_url;
 	std::string layout_path;
@@ -1205,11 +1222,12 @@ void app_idle()
 
 void app_destroy()
 {
+	g_host.stop_network();
 }
 
 // Portable UI dispatch entry point declared in core.h. Forwards to the
 // platform layer's task queue.
-void dispatch_to_ui(std::function<void()> fn)
+void webvis::dispatch_to_ui(std::function<void()> fn)
 {
 	pf::run_ui(std::move(fn));
 }

@@ -7,6 +7,8 @@
 #include "style.h"
 #include <memory>
 
+namespace webvis
+{
 
 class element;
 
@@ -299,7 +301,7 @@ public:
 
 class box;
 class background;
-class render_win32;
+class renderer;
 
 enum element_type
 {
@@ -413,7 +415,7 @@ protected:
 	box* m_box;
 	std::vector<std::unique_ptr<box>> m_boxes;
 
-	pf::font_handle m_font;
+	font_handle m_font;
 	int m_font_size;
 	font_metrics m_font_metrics;
 
@@ -494,7 +496,7 @@ public:
 	margins get_margins() const;
 	margins get_paddings() const;
 	position get_placement() const;
-	pf::font_handle get_font(font_metrics* fm = nullptr);
+	font_handle get_font(font_metrics* fm = nullptr);
 	const background* get_background(bool own_only = false);
 
 	// Null when the child was taken; a refused node is handed back so a caller
@@ -577,10 +579,10 @@ public:
 	void apply_vertical_align();
 	void calc_document_size(size& sz, int x = 0, int y = 0);
 	void calc_outlines(int parent_width);
-	void draw(render_win32& renderer, int x, int y, const position* clip);
-	void draw_background(render_win32& renderer, int x, int y, const position* clip);
-	void draw_children(render_win32& renderer, int x, int y, const position* clip, draw_flag flag, int zindex);
-	void draw_stacking_context(render_win32& renderer, int x, int y, const position* clip, bool with_positioned);
+	void draw(renderer& renderer, int x, int y, const position* clip);
+	void draw_background(renderer& renderer, int x, int y, const position* clip);
+	void draw_children(renderer& renderer, int x, int y, const position* clip, draw_flag flag, int zindex);
+	void draw_stacking_context(renderer& renderer, int x, int y, const position* clip, bool with_positioned);
 	void get_content_size(size& sz, int max_width);
 	void get_inline_boxes(position::vector& boxes);
 	void get_line_left_right(int y, int def_right, int& ln_left, int& ln_right);
@@ -606,7 +608,7 @@ protected:
 	int fix_line_width(int max_width, element_float flt);
 	void parse_background();
 	void init_background_paint(position pos, background_paint& bg_paint, const background* bg);
-	void draw_list_marker(render_win32& renderer, const position& pos);
+	void draw_list_marker(renderer& renderer, const position& pos);
 	void parse_nth_child_params(const std::string& param, int& num, int& off);
 	void remove_before_after();
 	void add_text(const std::string& txt);
@@ -914,3 +916,5 @@ public:
 		return el->get_display() == display_table_cell;
 	}
 };
+
+} // namespace webvis

@@ -2,41 +2,88 @@
 
 Potato is a lightweight Win32 web browser written in C++ that implements its own HTML/CSS rendering engine. It does not use a webview or embedded browser component — all parsing, styling, layout, and painting are done from scratch.
 
+The repository holds two targets:
+
+- **libwebvis** (`src/libwebvis`) — a standalone HTML/CSS layout and rendering
+  engine, built as a static library. It owns parsing, the cascade, layout and
+  the decision of what to paint where. It owns no window, no socket and no
+  drawing surface, and it does **not** link platform-h. It is meant to be
+  reused by other apps in this workspace.
+- **potato** (`src/potato`) — the browser itself: window, toolbar, address bar,
+  navigation history, and the platform-h backed implementations of the two
+  interfaces libwebvis needs.
+
 ## Architecture
 
 - **HTML parsing**: A tokenizer (`scanner`) feeds an HTML parser (`parser`) that builds a DOM tree of `element` nodes owned by a `document`.
 - **CSS engine**: Stylesheets are parsed into selectors (`css`) and property maps (`style`). CSS values use `css_length` with `calc()` support. Media queries filter rules by screen type.
-- **Layout**: Elements compute their box model (margins, padding, borders) and position children using block/inline flow (`box`). Tables have dedicated grid layout (`table_grid`). Layout is independent of any drawing surface — `document::render(max_width)` takes no renderer and needs no window, so it can run headless. Only `document::draw` requires a `render_win32`.
-- **Rendering**: `render_win32` draws text, backgrounds, borders and images through the `pf::draw_context` abstraction, which platform-h implements over GDI and WIC.
-- **Networking**: An async WinHTTP client (`http`) fetches pages, CSS and images. Every result is marshalled back to the UI thread with `pf::run_ui`.
+- **Layout**: Elements compute their box model (margins, padding, borders) and position children using block/inline flow (`box`). Tables have dedicated grid layout (`table_grid`). Layout is independent of any drawing surface — `document::render(max_width)` takes no renderer and needs no window, so it can run headless. Only `document::draw` requires a `renderer`.
+- **Rendering**: `renderer` draws text, backgrounds, borders and images through `webvis::device_context`, which potato implements over `pf::draw_context`.
+- **Networking**: libwebvis never opens a socket. It asks for a URL through
+  `webvis::host::load_resource` and is handed back either text or a decoded
+  image. Potato backs that with an async WinHTTP client that downloads to a
+  temp file and marshals the completion to the UI thread with `pf::run_ui`.
 - **UI**: `main.cpp` builds the frame: `content_reactor` hosts the rendered document with scrolling, and `main_frame_reactor` owns the toolbar, address bar, menu and navigation history.
 - **Platform layer**: the `pf::` surface (windows, drawing, fonts, files, HTTP)
   lives in the separate **platform-h** repository, shared with the other apps in
   this workspace. CMake pulls it in with `FetchContent`, building against a
-  sibling `../platform-h` checkout when one exists.
+  sibling `../platform-h` checkout when one exists. Only the **potato** target
+  links it.
+
+## The libwebvis boundary
+
+Everything platform-specific reaches the engine through `src/libwebvis/webvis.h`:
+
+- **`webvis::device_context`** — a *stateless* drawing surface. Every call
+  carries its own coordinates and colours; there is no current pen, brush or
+  transform to set up first. Only painting goes through it, which is what keeps
+  layout headless. `push_clip`/`pop_clip` are the one piece of state and nest
+  strictly.
+- **`webvis::host`** — text measurement, resource loading and environment
+  queries (screen size/DPI, URL resolution, charset decoding). Text measurement
+  lives here rather than on the device context *precisely so that layout needs
+  no surface*.
+
+`webvis::set_host()` installs the host before any document is created. The
+engine also calls `webvis::dispatch_to_ui()`, which the app forwards to the
+platform task queue.
+
+Two rules keep the split honest:
+
+- `src/libwebvis` must contain no `pf::`, no `platform.h` and no Windows SDK
+  header. Grep for `pf::` there; the answer must stay empty.
+- The user-agent stylesheet is compiled *into* the library from
+  `src/libwebvis/res/master.css` by `cmake/embed_master_css.cmake`, so a
+  consumer needs no data file alongside it.
+
+Engine code lives in `namespace webvis`. `main.cpp` pulls it in with a
+using-directive; other consumers should qualify instead.
 
 ## Project structure
 
 ```
-CMakeLists.txt       — Build definition (MSVC + Ninja). Declares the app with
-                       platform_add_app(): icon, manifest, version info and the
-                       embedded res/ files are generated, so there is no .rc
-                       and no resource.h in this repo
+CMakeLists.txt       — Build definition (MSVC + Ninja). Declares the webvis
+                       static library and the potato app. platform_add_app()
+                       generates the icon, manifest, version info and embedded
+                       res/ files, so there is no .rc and no resource.h
 CMakePresets.json    — `debug` and `release` configure/build presets
 dd.ps1               — Developer commands: build, run, test, layout, clean
+cmake/
+└── embed_master_css.cmake — Compiles res/master.css into the library
 
-src/
-├── pch.h            — Precompiled header: STL, platform.h and core.h. Contains
-│                      NO Windows SDK headers by design
-├── targetver.h      — Windows SDK version targeting
-├── core.h           — Foundational types: geometry (position, recti, size_i),
-│                      CSS enums, css_length with calc() support, web_color,
-│                      string helpers, font metrics, the unit-test harness
+src/libwebvis/       — The engine. No platform dependency.
+├── webvis.h         — PUBLIC API: the device_context and host interfaces, the
+│                      shared value types (position, size, web_color,
+│                      font_metrics), font/image handles, and view_host
+├── pch.h            — Precompiled header: STL only, by design
+├── core.h           — CSS enums, css_length with calc() support, string
+│                      helpers, the unit-test harness
 ├── core.cpp         — CSS colour parsing (hex/rgb/hsl/named), value_index
-│                      lookups, split_string, byte-stream charset decoding
-├── style.h          — CSS engine: border/background structs, the render_win32
-│                      renderer, style property map, media queries, CSS
-│                      selectors with specificity, stylesheet container
+│                      lookups, split_string, byte-stream charset decoding,
+│                      and the host global
+├── style.h          — CSS engine: border/background structs, the renderer,
+│                      style property map, media queries, CSS selectors with
+│                      specificity, stylesheet container
 ├── style.cpp        — CSS shorthand parsing, media query evaluation, selector
 │                      parsing and matching, at-rule handling, and painting of
 │                      text, borders, backgrounds and images
@@ -45,16 +92,25 @@ src/
 ├── element.cpp      — Element lifecycle, CSS property resolution,
 │                      block/inline/flex/table layout, float positioning,
 │                      background/border painting, selector matching
-├── document.h       — Async HTTP client, HTML scanner/tokenizer, HTML parser
-│                      with implicit tag closing, and the document model that
-│                      owns the DOM tree and manages fonts/stylesheets
-├── document.cpp     — Downloads, HTML entity table, the parser, document
-│                      rendering, font caching, stylesheet application, and the
-│                      headless layout harness plus its tests
+├── document.h       — HTML scanner/tokenizer, HTML parser with implicit tag
+│                      closing, and the document model that owns the DOM tree
+│                      and manages fonts/stylesheets
+├── document.cpp     — HTML entity table, the parser, document rendering, font
+│                      caching, stylesheet application, and the headless
+│                      layout harness plus its tests
+└── res/
+    └── master.css   — Default user-agent stylesheet (compiled into the lib)
+
+src/potato/          — The browser. Implements what libwebvis asks for.
+├── pch.h            — Precompiled header: STL, platform.h and webvis.h.
+│                      Contains NO Windows SDK headers by design
+├── targetver.h      — Windows SDK version targeting
+├── webvis_host.h    — potato_device_context, potato_host, potato_image
+├── webvis_host.cpp  — GDI fonts, WIC image decoding, the async WinHTTP
+│                      client, the SVG placeholder, screen metrics
 ├── main.cpp         — app_init, the browser frame and content view, the CLI
 │                      modes (--test, --layout, --eval) and dispatch_to_ui
 └── res/
-    ├── master.css   — Default user-agent stylesheet (embedded via EMBED)
     ├── potato.ico   — Application icon (embedded via ICON)
     └── test.htm     — Built-in test page (embedded via EMBED)
 ```
@@ -62,8 +118,8 @@ src/
 ## Build
 
 ```
-.\dd.ps1 build              # Release (default)
-.\dd.ps1 build -Config Debug
+.\dd.ps1 build              # both configs
+.\dd.ps1 build debug
 ```
 
 `dd.ps1` locates Visual Studio with vswhere, enters the x64 MSVC environment,
@@ -137,10 +193,10 @@ basis for judging a layout change. `-v`/`--verbose` adds `view_host::diagnostic`
 and `resource_finished`; without it the headless view swallows all of them,
 because the base `view_host` methods are empty.
 
-Headless is **not** offline. The document constructor calls `m_http.open()`, so
-external CSS and images still issue real WinHTTP requests whose results merely
-never land, and **timings vary with network weather even though dimensions do
-not**. Trust the dimensions; treat a single timing as noisy.
+Headless is **not** offline. `app_init` opens the HTTP session before dispatching
+to any mode, so external CSS and images still issue real WinHTTP requests whose
+results merely never land, and **timings vary with network weather even though
+dimensions do not**. Trust the dimensions; treat a single timing as noisy.
 
 ### `--test` — the regression gate
 
@@ -198,8 +254,8 @@ One thread of our own, plus whatever WinHTTP uses internally:
   always queues, never runs the task inline and never waits for it.
 
 Locks exist, but every one is a short leaf-level guard around a container
-(`cs_ui`, `http::m_mutex`, `document::m_fonts_mutex`, the WinHTTP request
-mutexes). The invariant to preserve:
+(`cs_ui`, the HTTP client's request list, `document::m_fonts_mutex`, the
+WinHTTP request mutexes). The invariant to preserve:
 
 > No lock is ever held across a callout, a queued task, or another lock.
 
@@ -219,6 +275,9 @@ use-after-free presents as either a hang or an access violation.
 - CSS keyword sets are semicolon-delimited string tables (e.g. `border_style_strings`) searched by `value_index`; `prop_id` / `prop_id_strings` do the same for property names, and anything absent from that table is discarded at parse time.
 - Custom CSS properties use the `-potato-` vendor prefix.
 - No external HTML/CSS library dependencies — everything is self-contained in `src/`.
+- **libwebvis stays platform-free.** If the engine needs something from the
+  machine, add it to `webvis::host` or `webvis::device_context` and implement it
+  in `src/potato/webvis_host.cpp` — never reach for `pf::` from `src/libwebvis`.
 
 ### Splitting CSS text
 
@@ -229,3 +288,34 @@ separator, `margin: calc(1px + 2px) 0` carries the value separator, and
 depth-aware `find_last_combinator` for the same reason: `:nth-child(2n+1)` must
 not split at its `+`. If you add a new splitter, respect nesting or you will
 reintroduce a whole family of silent bugs.
+
+## dd build system
+
+This repo uses the vendored dd build system. dd has two modes.
+
+**CLI mode** is the default; each verb runs once and exits:
+
+```pwsh
+.\dd.ps1 test                  # build both configs and run the suite
+.\dd.ps1 build debug
+.\dd.ps1 doctor --json
+.\dd.ps1 commands --json       # list this project's own commands
+```
+
+**MCP mode** — `.\dd.ps1 mcp` turns the process into a stdio JSON-RPC server for an
+MCP client, adapting typed requests onto CLI mode. It owns stdout for protocol
+messages, so it prints no result envelope and rejects `--json`. Register it with
+`.\dd.ps1 ide --mcp`.
+
+Project settings live in `dd.psd1`; dependency pins live in
+`cmake/dd-dependencies.json` with `dependencies.owner = 'dd'`. Vendored dd file
+hashes are recorded in `docs/dd-upstream.json`.
+
+### Project commands
+
+Ported from the pre-dd driver; both declare `effects = 'read'`:
+
+```pwsh
+.\dd.ps1 layout --file test-files/wikipedia-main-page.html --width 1200
+.\dd.ps1 analyze-wiki-css
+```;

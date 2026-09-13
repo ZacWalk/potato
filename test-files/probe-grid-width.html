@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><style>
+ body{margin:0}
+ .host{width:1000px}
+ .v1{display:grid;width:100%}
+ .v2{display:grid;width:100%;max-width:calc(1280px - 32px)}
+ .v3{display:grid;width:100%;max-width:calc(100% - 32px)}
+ .v4{display:grid;width:100%;grid-template-columns:repeat(24, 1fr)}
+ .v5{display:grid;width:100%;margin-inline:16px}
+ .v6{display:grid;width:100%;min-width:fit-content}
+ .v7{display:grid;width:100%;grid-template-rows:min-content minmax(0, 1fr)}
+ .v8{display:grid;width:100%;column-gap:16px;grid-auto-flow:row}
+ .v9{display:grid;width:100%;max-width:min(calc(100% - 32px), 1008px)}
+</style></head><body>
+<div class="host"><div class="v1" id="v1">a</div></div>
+<div class="host"><div class="v2" id="v2">a</div></div>
+<div class="host"><div class="v3" id="v3">a</div></div>
+<div class="host"><div class="v4" id="v4">a</div></div>
+<div class="host"><div class="v5" id="v5">a</div></div>
+<div class="host"><div class="v6" id="v6">a</div></div>
+<div class="host"><div class="v7" id="v7">a</div></div>
+<div class="host"><div class="v8" id="v8">a</div></div>
+<div class="host"><div class="v9" id="v9">a</div></div>
+</body></html>
