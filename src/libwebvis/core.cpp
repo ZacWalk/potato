@@ -1,8 +1,26 @@
 // core.cpp - CSS color parsing (hex/rgb/hsl/named), value_index lookups into
-// semicolon-delimited tables, split_string, and byte-stream charset decoding.
+// semicolon-delimited tables, split_string, byte-stream charset decoding, and
+// the library's host global plus the compiled-in user-agent stylesheet.
 
 #include "pch.h"
 
+namespace
+{
+	webvis::host* g_host = nullptr;
+}
+
+void webvis::set_host(host* h)
+{
+	g_host = h;
+}
+
+webvis::host* webvis::current_host()
+{
+	return g_host;
+}
+
+namespace webvis
+{
 
 std::string empty;
 
@@ -98,6 +116,11 @@ bool value_in_list(const std::string_view val, const char* strings, const char d
 
 namespace
 {
+	constexpr bool is_utf8_continuation(const char b)
+	{
+		return (static_cast<uint8_t>(b) & 0xC0) == 0x80;
+	}
+
 	bool is_valid_utf8(const std::string_view s)
 	{
 		size_t i = 0;
@@ -117,13 +140,21 @@ namespace
 
 			for (size_t k = 1; k < n; ++k)
 			{
-				if (!pf::is_utf8_continuation(s[i + k])) return false;
+				if (!is_utf8_continuation(s[i + k])) return false;
 			}
 
 			i += n;
 		}
 
 		return true;
+	}
+
+	// Decode through the host, falling back to the raw bytes when there is no
+	// host or the host does not know the label.
+	bool transcode(const std::string_view bytes, const std::string_view charset, std::string& out)
+	{
+		const auto h = webvis::current_host();
+		return h && h->transcode_to_utf8(bytes, charset, out);
 	}
 
 	// Pull the value of a `charset=` parameter out of a Content-Type header or
@@ -195,8 +226,9 @@ std::string decode_to_utf8(const std::string_view bytes, const std::string_view 
 		const auto b0 = static_cast<uint8_t>(bytes[0]);
 		const auto b1 = static_cast<uint8_t>(bytes[1]);
 
-		if (b0 == 0xFF && b1 == 0xFE) return pf::transcode_to_utf8(bytes.substr(2), 1200);
-		if (b0 == 0xFE && b1 == 0xFF) return pf::transcode_to_utf8(bytes.substr(2), 1201);
+		std::string decoded;
+		if (b0 == 0xFF && b1 == 0xFE && transcode(bytes.substr(2), "utf-16le", decoded)) return decoded;
+		if (b0 == 0xFE && b1 == 0xFF && transcode(bytes.substr(2), "utf-16be", decoded)) return decoded;
 	}
 
 	// 2. The transport-level charset, then the in-document declaration.
@@ -206,15 +238,17 @@ std::string decode_to_utf8(const std::string_view bytes, const std::string_view 
 	if (!charset.empty())
 	{
 		// An unrecognised label falls through to the heuristic below.
-		if (const auto cp = pf::charset_to_codepage(charset))
-		{
-			return pf::transcode_to_utf8(bytes, cp);
-		}
+		std::string decoded;
+		if (transcode(bytes, charset, decoded)) return decoded;
 	}
 
 	// 3. Nothing usable declared: trust the bytes if they are valid UTF-8,
 	// otherwise fall back to the de-facto legacy default.
-	return is_valid_utf8(bytes) ? std::string(bytes) : pf::transcode_to_utf8(bytes, 1252);
+	if (is_valid_utf8(bytes)) return std::string(bytes);
+
+	std::string decoded;
+	if (transcode(bytes, "windows-1252", decoded)) return decoded;
+	return std::string(bytes);
 }
 
 
@@ -708,3 +742,5 @@ std::string run_tests()
 	tests.run_tests(output);
 	return output.str();
 }
+
+} // namespace webvis

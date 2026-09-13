@@ -5,6 +5,8 @@
 #include "element.h"
 #include "document.h"
 
+namespace webvis
+{
 
 const css_props& css_props::defaults()
 {
@@ -567,7 +569,7 @@ void element::get_content_size(size& sz, const int max_width)
 	}
 }
 
-void element::draw(render_win32& renderer, const int x, const int y, const position* clip)
+void element::draw(renderer& renderer, const int x, const int y, const position* clip)
 {
 	position pos = m_pos;
 	pos.x += x;
@@ -630,7 +632,7 @@ void element::draw(render_win32& renderer, const int x, const int y, const posit
 	}
 }
 
-pf::font_handle element::get_font(font_metrics* fm)
+font_handle element::get_font(font_metrics* fm)
 {
 	if (m_type == el_text || m_type == el_space)
 	{
@@ -4194,7 +4196,7 @@ void element::set_tag_name(const std::string_view name)
 	m_tag = name;
 }
 
-void element::draw_background(render_win32& renderer, int x, int y, const position* clip)
+void element::draw_background(renderer& renderer, int x, int y, const position* clip)
 {
 	position pos = m_pos;
 	pos.x += x;
@@ -5143,7 +5145,7 @@ visibility element::get_visibility() const
 	return m_visibility;
 }
 
-void element::draw_list_marker(render_win32& renderer, const position& pos)
+void element::draw_list_marker(renderer& renderer, const position& pos)
 {
 	list_marker lm;
 
@@ -5188,7 +5190,7 @@ void element::draw_list_marker(render_win32& renderer, const position& pos)
 	renderer.draw_list_marker(lm);
 }
 
-void element::draw_children(render_win32& renderer, const int x, const int y, const position* clip,
+void element::draw_children(renderer& renderer, const int x, const int y, const position* clip,
                             const draw_flag flag, const int zindex)
 {
 	position pos = m_pos;
@@ -5553,7 +5555,7 @@ void element::render_positioned(const render_type rt)
 	}
 }
 
-void element::draw_stacking_context(render_win32& renderer, const int x, const int y, const position* clip,
+void element::draw_stacking_context(renderer& renderer, const int x, const int y, const position* clip,
                                     const bool with_positioned)
 {
 	if (is_visible())
@@ -7355,3 +7357,5 @@ int& table_column_accessor_width::get(table_column& col)
 {
 	return col.width;
 }
+
+} // namespace webvis

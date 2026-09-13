@@ -1,10 +1,12 @@
 // style.cpp - CSS shorthand parsing, media query evaluation, selector matching,
 // at-rule handling, stylesheet loading, and rendering of text, borders,
-// backgrounds, and images via pf::draw_context.
+// backgrounds, and images through webvis::device_context.
 
 #include "pch.h"
 #include "document.h"
 
+namespace webvis
+{
 
 auto prop_id_strings =
 	"-potato-border-spacing-x;-potato-border-spacing-y;align-items;align-self;"
@@ -1828,45 +1830,35 @@ void css::parse_atrule(const std::string& text, const std::string& baseurl, docu
 }
 
 
-static size get_img_size(const pf::bitmap_ptr& bmp)
+static size get_img_size(const image_ptr& img)
 {
-	size result;
-
-	if (bmp)
-	{
-		result.width = bmp->width;
-		result.height = bmp->height;
-	}
-
-	return result;
+	return img ? img->dimensions() : size{};
 }
 
-static pf::color_t to_pf_color(const web_color& c)
+static void draw_img(device_context& dc, const image_ptr& img, const position& pos)
 {
-	return pf::color_t(c.red, c.green, c.blue);
-}
-
-static void draw_img(pf::draw_context& dc, const pf::bitmap_ptr& bmp, const position& pos)
-{
-	if (bmp && !bmp->empty())
+	if (img && pos.width > 0 && pos.height > 0)
 	{
-		dc.draw_bitmap(pf::irect(pos.x, pos.y, pos.x + pos.width, pos.y + pos.height), *bmp);
+		dc.draw_image(img, pos);
 	}
 }
 
-static void draw_img_bg(pf::draw_context& dc, const pf::bitmap_ptr& bgbmp, const position& draw_pos,
+static void draw_img_bg(device_context& dc, const image_ptr& bgimg, const position& draw_pos,
                         const position& pos, const background_repeat repeat, background_attachment /*attachment*/)
 {
-	if (!bgbmp || bgbmp->empty()) return;
+	if (!bgimg) return;
 
-	const int img_width = bgbmp->width;
-	const int img_height = bgbmp->height;
+	const auto dim = bgimg->dimensions();
+	const int img_width = dim.width;
+	const int img_height = dim.height;
 
-	dc.set_clip_rect(pf::irect(draw_pos.left(), draw_pos.top(), draw_pos.right(), draw_pos.bottom()));
+	if (img_width <= 0 || img_height <= 0) return;
+
+	dc.push_clip(draw_pos);
 
 	const auto blit = [&](const int x, const int y)
 	{
-		dc.draw_bitmap(pf::irect(x, y, x + img_width, y + img_height), *bgbmp);
+		dc.draw_image(bgimg, position(x, y, img_width, img_height));
 	};
 
 	switch (repeat)
@@ -1887,27 +1879,24 @@ static void draw_img_bg(pf::draw_context& dc, const pf::bitmap_ptr& bgbmp, const
 			blit(pos.left(), y);
 		break;
 	case background_repeat_repeat:
-		if (img_height > 0 && img_width > 0)
-		{
-			for (int x = pos.left(); x < pos.right(); x += img_width)
-				for (int y = pos.top(); y < pos.bottom(); y += img_height)
-					blit(x, y);
-		}
+		for (int x = pos.left(); x < pos.right(); x += img_width)
+			for (int y = pos.top(); y < pos.bottom(); y += img_height)
+				blit(x, y);
 		break;
 	}
 
-	dc.clear_clip_rect();
+	dc.pop_clip();
 }
 
 
-void render_win32::draw_text(const char* text, const pf::font_handle hFont, const web_color& color, const position& pos)
+void renderer::draw_text(const char* text, const font_handle hFont, const web_color& color, const position& pos)
 {
 	apply_clip();
-	_ctx->draw_text_h(pos.left(), pos.top(), text ? text : "", hFont, to_pf_color(color));
+	_ctx->draw_text(pos.left(), pos.top(), text ? text : "", hFont, color);
 	release_clip();
 }
 
-void render_win32::fill_rect(const position& pos, const web_color& color, const css_border_radius& radius)
+void renderer::fill_rect(const position& pos, const web_color& color, const css_border_radius& radius)
 {
 	apply_clip();
 	fill_rect(pos.x, pos.y, pos.width, pos.height, color, radius);
@@ -1915,7 +1904,7 @@ void render_win32::fill_rect(const position& pos, const web_color& color, const 
 }
 
 
-void render_win32::draw_list_marker(const list_marker& marker)
+void renderer::draw_list_marker(const list_marker& marker)
 {
 	apply_clip();
 
@@ -1947,18 +1936,18 @@ void render_win32::draw_list_marker(const list_marker& marker)
 	release_clip();
 }
 
-void render_win32::draw_image(const pf::bitmap_ptr& bm, const position& pos)
+void renderer::draw_image(const image_ptr& img, const position& pos)
 {
-	draw_img(*_ctx, bm, pos);
+	draw_img(*_ctx, img, pos);
 }
 
-size image_size(const pf::bitmap_ptr& bm)
+size image_size(const image_ptr& img)
 {
-	return get_img_size(bm);
+	return get_img_size(img);
 }
 
 
-void render_win32::draw_background(render_win32& renderer, const background_paint& bg)
+void renderer::draw_background(renderer& renderer, const background_paint& bg)
 {
 	apply_clip();
 
@@ -1979,7 +1968,7 @@ void render_win32::draw_background(render_win32& renderer, const background_pain
 	release_clip();
 }
 
-void render_win32::set_clip(const position& pos, const bool valid_x, const bool valid_y)
+void renderer::set_clip(const position& pos, const bool valid_x, const bool valid_y)
 {
 	position clip_pos = pos;
 
@@ -1996,7 +1985,7 @@ void render_win32::set_clip(const position& pos, const bool valid_x, const bool 
 	m_clips.push_back(clip_pos);
 }
 
-void render_win32::del_clip()
+void renderer::del_clip()
 {
 	if (!m_clips.empty())
 	{
@@ -2004,65 +1993,71 @@ void render_win32::del_clip()
 	}
 }
 
-void render_win32::apply_clip()
+void renderer::apply_clip()
 {
 	if (!m_clips.empty())
 	{
-		const position clip_pos = m_clips.back();
-		_ctx->set_clip_rect(pf::irect(clip_pos.left(), clip_pos.top(), clip_pos.right(), clip_pos.bottom()));
+		_ctx->push_clip(m_clips.back());
+		++_clip_depth;
 	}
 }
 
-void render_win32::release_clip()
+void renderer::release_clip()
 {
-	_ctx->clear_clip_rect();
+	if (_clip_depth > 0)
+	{
+		_ctx->pop_clip();
+		--_clip_depth;
+	}
 }
 
-void render_win32::draw_ellipse(const int x, const int y, const int width, const int height, const web_color& color,
+void renderer::draw_ellipse(const int x, const int y, const int width, const int height, const web_color& color,
                                 const int line_width)
 {
-	_ctx->draw_ellipse(x, y, width, height, to_pf_color(color), line_width > 0 ? line_width : 1);
+	_ctx->draw_ellipse(position(x, y, width, height), color, line_width > 0 ? line_width : 1);
 }
 
-void render_win32::fill_ellipse(const int x, const int y, const int width, const int height, const web_color& color)
+void renderer::fill_ellipse(const int x, const int y, const int width, const int height, const web_color& color)
 {
-	_ctx->fill_ellipse(x, y, width, height, to_pf_color(color));
+	_ctx->fill_ellipse(position(x, y, width, height), color);
 }
 
-void render_win32::fill_rect(const int x, const int y, const int width, const int height, const web_color& color,
+void renderer::fill_rect(const int x, const int y, const int width, const int height, const web_color& color,
                              const css_border_radius& /*radius*/)
 {
 	// Corners are cascaded and measured but not yet painted rounded.
-	_ctx->fill_solid_rect(x, y, width, height, to_pf_color(color));
+	_ctx->fill_rect(position(x, y, width, height), color);
 }
 
 
-void render_win32::draw_borders(const css_borders& borders, const position& draw_pos, bool /*root*/)
+void renderer::draw_borders(const css_borders& borders, const position& draw_pos, bool /*root*/)
 {
 	apply_clip();
 
 	if (borders.left.width.val() != 0 && borders.left.style > border_style_hidden)
 	{
 		const int w = round_f(borders.left.width.val());
-		_ctx->fill_solid_rect(draw_pos.left(), draw_pos.top(), w, draw_pos.height, to_pf_color(borders.left.color));
+		_ctx->fill_rect(position(draw_pos.left(), draw_pos.top(), w, draw_pos.height), borders.left.color);
 	}
 	if (borders.right.width.val() != 0 && borders.right.style > border_style_hidden)
 	{
 		const int w = round_f(borders.right.width.val());
-		_ctx->fill_solid_rect(draw_pos.right() - w, draw_pos.top(), w, draw_pos.height,
-		                      to_pf_color(borders.right.color));
+		_ctx->fill_rect(position(draw_pos.right() - w, draw_pos.top(), w, draw_pos.height),
+		                borders.right.color);
 	}
 	if (borders.top.width.val() != 0 && borders.top.style > border_style_hidden)
 	{
 		const int h = round_f(borders.top.width.val());
-		_ctx->fill_solid_rect(draw_pos.left(), draw_pos.top(), draw_pos.width, h, to_pf_color(borders.top.color));
+		_ctx->fill_rect(position(draw_pos.left(), draw_pos.top(), draw_pos.width, h), borders.top.color);
 	}
 	if (borders.bottom.width.val() != 0 && borders.bottom.style > border_style_hidden)
 	{
 		const int h = round_f(borders.bottom.width.val());
-		_ctx->fill_solid_rect(draw_pos.left(), draw_pos.bottom() - h, draw_pos.width, h,
-		                      to_pf_color(borders.bottom.color));
+		_ctx->fill_rect(position(draw_pos.left(), draw_pos.bottom() - h, draw_pos.width, h),
+		                borders.bottom.color);
 	}
 
 	release_clip();
 }
+
+} // namespace webvis

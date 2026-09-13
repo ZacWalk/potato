@@ -1,11 +1,12 @@
-// style.h - CSS engine: border/background structs, the render_win32 GDI+
-// renderer, the style property map, media query evaluation, CSS selectors with
-// specificity, and the css stylesheet container.
+// style.h - CSS engine: border/background structs, the renderer that paints
+// through a webvis::device_context, the style property map, media query
+// evaluation, CSS selectors with specificity, and the css stylesheet container.
 
 #pragma once
-#include "platform.h"
 #include "core.h"
 
+namespace webvis
+{
 
 struct css_border
 {
@@ -70,7 +71,7 @@ public:
 class background_paint
 {
 public:
-	pf::bitmap_ptr image;
+	image_ptr image;
 	background_attachment attachment = background_attachment_scroll;
 	background_repeat repeat = background_repeat_repeat;
 	web_color color{0, 0, 0, 0};
@@ -99,32 +100,36 @@ struct list_marker
 
 // Measuring an image needs no drawing surface, so layout can call this without
 // a renderer or a window.
-size image_size(const pf::bitmap_ptr& bm);
+size image_size(const image_ptr& img);
 
-class render_win32
+// Paints a laid-out document through a stateless device_context. The renderer
+// itself holds only the clip stack and the origin of the client area; every
+// drawing call it makes is fully specified.
+class renderer
 {
 protected:
 	position::vector m_clips;
-	pf::draw_context* _ctx;
+	device_context* _ctx;
 	position _client_pos;
+	int _clip_depth = 0;
 
 public:
-	render_win32(pf::draw_context& ctx, const position& client_pos) : _ctx(&ctx), _client_pos(client_pos)
+	renderer(device_context& ctx, const position& client_pos) : _ctx(&ctx), _client_pos(client_pos)
 	{
 	}
 
-	~render_win32() = default;
+	~renderer() = default;
 
-	void draw_image(const pf::bitmap_ptr& bm, const position& pos);
+	void draw_image(const image_ptr& img, const position& pos);
 
 	void apply_clip();
 	void del_clip();
 
-	void draw_background(render_win32& renderer, const background_paint& bg);
+	void draw_background(renderer& r, const background_paint& bg);
 	void draw_borders(const css_borders& borders, const position& draw_pos, bool root);
 	void draw_ellipse(int x, int y, int width, int height, const web_color& color, int line_width);
 	void draw_list_marker(const list_marker& marker);
-	void draw_text(const char* text, pf::font_handle hFont, const web_color& color, const position& pos);
+	void draw_text(const char* text, font_handle hFont, const web_color& color, const position& pos);
 	void fill_ellipse(int x, int y, int width, int height, const web_color& color);
 	void fill_rect(const position& pos, const web_color& color, const css_border_radius& radius);
 	void fill_rect(int x, int y, int width, int height, const web_color& color, const css_border_radius& radius);
@@ -590,3 +595,5 @@ private:
 	// m_selectors is already sorted by (specificity, order).
 	void rebuild_buckets();
 };
+
+} // namespace webvis

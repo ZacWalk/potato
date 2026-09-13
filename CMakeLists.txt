@@ -30,26 +30,69 @@ endif()
 include(FetchContent)
 FetchContent_Declare(platform_h
     GIT_REPOSITORY https://github.com/ZacWalk/platform-h.git
-    GIT_TAG        8e9be5de233d1797ce7a2b50fe663042469611a9
+    GIT_TAG        894afaf337c722c4eafa0ec6b91fa6b83e06966e
 )
 FetchContent_MakeAvailable(platform_h)
 
+# ── libwebvis ────────────────────────────────────────────────────────────────
+# A standalone HTML/CSS layout and rendering engine. It deliberately does NOT
+# link platform-h: everything platform-specific reaches it through the
+# device_context and host interfaces in src/libwebvis/webvis.h.
+
+# The user-agent stylesheet is compiled into the library so consumers need not
+# ship a data file alongside it.
+set(webvis_generated "${CMAKE_CURRENT_BINARY_DIR}/generated/webvis")
+set(master_css_cpp "${webvis_generated}/master_css.cpp")
+
+add_custom_command(
+    OUTPUT "${master_css_cpp}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${webvis_generated}"
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/src/libwebvis/res/master.css
+            -DOUTPUT=${master_css_cpp}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_master_css.cmake
+    DEPENDS src/libwebvis/res/master.css cmake/embed_master_css.cmake
+    COMMENT "Embedding the libwebvis user-agent stylesheet"
+    VERBATIM
+)
+
+add_library(webvis STATIC
+    src/libwebvis/core.cpp
+    src/libwebvis/document.cpp
+    src/libwebvis/element.cpp
+    src/libwebvis/style.cpp
+    "${master_css_cpp}"
+)
+
+add_library(webvis::webvis ALIAS webvis)
+
+target_include_directories(webvis PUBLIC src/libwebvis)
+target_compile_options(webvis PRIVATE /W3 /sdl /MP)
+target_precompile_headers(webvis PRIVATE src/libwebvis/pch.h)
+
+set_target_properties(webvis PROPERTIES
+    DEBUG_POSTFIX d
+    INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE
+)
+
+# ── potato ───────────────────────────────────────────────────────────────────
+# The browser: window, toolbar, navigation history, and the platform-h backed
+# implementations of the libwebvis device_context and host interfaces.
+
 platform_add_app(potato
     SOURCES
-        src/core.cpp
-        src/document.cpp
-        src/element.cpp
-        src/main.cpp
-        src/style.cpp
-    ICON        src/res/potato.ico
+        src/potato/main.cpp
+        src/potato/webvis_host.cpp
+    ICON        src/potato/res/potato.ico
     DESCRIPTION "Potato browser"
     OUTPUT_NAME potato-64
     EMBED
-        src/res/master.css
-        src/res/test.htm
+        src/potato/res/test.htm
 )
 
-target_include_directories(potato PRIVATE src)
+target_include_directories(potato PRIVATE src/potato)
+
+target_link_libraries(potato PRIVATE webvis::webvis)
 
 target_compile_definitions(potato PRIVATE _WINSOCK_DEPRECATED_NO_WARNINGS)
 
@@ -69,4 +112,11 @@ set_target_properties(potato PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE
 )
 
-target_precompile_headers(potato PRIVATE src/pch.h)
+target_precompile_headers(potato PRIVATE src/potato/pch.h)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(potato_tests tests/smoke.cpp)
+    add_test(NAME potato_unit COMMAND potato_tests)
+    set_tests_properties(potato_unit PROPERTIES TIMEOUT 30 LABELS potato)
+endif()

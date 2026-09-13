@@ -9,27 +9,25 @@ permissions:
   contents: read
 
 jobs:
-  build-and-test:
-    runs-on: windows-latest
+  build:
+    runs-on: windows-2025-vs2026
 
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      # dd.ps1 locates Visual Studio, enters the MSVC environment and falls back
-      # to the CMake and Ninja that ship with it, so there is nothing to install.
-      - name: Build Debug
+      # The vendored dd runtime locates Visual Studio, enters the MSVC
+      # environment and uses the CMake and Ninja that ship with it.
+      - name: Validate pinned dependency declarations
         shell: pwsh
-        run: .\dd.ps1 build -Config Debug
+        run: ./dd.ps1 dep install --non-interactive
 
-      # Deterministic: lays out a local file with no window and no network, so a
-      # failure here is always a real regression.
-      - name: Headless layout
+      - name: Check native toolchain
         shell: pwsh
-        run: .\dd.ps1 layout test-files\site-elements.html --width:1200
+        run: ./dd.ps1 doctor --non-interactive
 
-      # The unit suite, which also fetches four live URLs — this step can fail
-      # for reasons unrelated to a change if the network is unhappy.
-      - name: Regression gate
+      - name: Build and test Debug and Release
         shell: pwsh
-        run: .\dd.ps1 test
+        run: ./dd.ps1 test --non-interactive
