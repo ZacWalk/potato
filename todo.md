@@ -20,8 +20,8 @@
 
 ## Performance
 
-Measured, do not re-guess — see `/memories/repo/potato-style-perf-attribution.md`.
-`PARSE_STYLES` dominates (~45ms on BBC) and has **no single hotspot**.
+Measured, do not re-guess. `PARSE_STYLES` dominates (~45ms on BBC) and has
+**no single hotspot**.
 
 - **Parse CSS declarations into typed values once at cascade time** instead of
   re-parsing strings per element. `element::parse_styles` currently performs
@@ -61,9 +61,3 @@ Measured, do not re-guess — see `/memories/repo/potato-style-perf-attribution.
 - Drop the HTTP temp-file round trip.
 - Duplicated 160-byte `css_border_radius`; shrink `css_length` from 20 to 16
   bytes.
-
-## Docs
-
-- **`AGENTS.md` "Key conventions" is stale** — it still claims wide strings
-  (`std::wstring`, `_t()`), a `ui.h` that no longer exists, and a GDI+
-  `render_win32`. The codebase is UTF-8 `std::string` throughout.
