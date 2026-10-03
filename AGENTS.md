@@ -146,6 +146,22 @@ Other commands:
 .\dd.ps1 clean --dry-run           # dd removes only build trees it can verify
 ```
 
+The dd driver is vendored from [ZacWalk/dd](https://github.com/ZacWalk/dd) as
+`dd.ps1` and `.dd/`; [docs/dd-upstream.json](docs/dd-upstream.json) records the
+hashes. Potato-specific configuration is in `dd.psd1`; platform-h, the one
+dependency, is pinned by the `GIT_TAG` in `CMakeLists.txt`, not in
+`cmake/dd-dependencies.json`. `.\dd.ps1 commands --json` prints this
+project's command list. Upstream dd owns the documentation for
+[CLI and MCP mode](https://github.com/ZacWalk/dd/blob/main/docs/mcp.md#two-modes)
+and for [built-in commands](https://github.com/ZacWalk/dd/blob/main/docs/cli.md#commands).
+
+Project commands ported from the pre-dd driver; both declare `effects = 'read'`:
+
+```pwsh
+.\dd.ps1 layout --file test-files/wikipedia-main-page.html --width 1200
+.\dd.ps1 analyze-wiki-css
+```
+
 ## Testing
 
 **Never launch a visible window to verify a change** — a popping UI steals focus
@@ -270,6 +286,13 @@ the app freezes, suspect an infinite loop or memory corruption, not a deadlock.
 A corrupted container walked by a tree/list traversal can spin forever, and a
 use-after-free presents as either a hang or an access violation.
 
+## Performance notes
+
+Release keeps the optimisation flags in `CMakeLists.txt` because the style
+measurements in [todo.md](todo.md#performance) were taken against them.
+Measure before optimising: those measurements found no single hotspot, so
+intuition is not a guide.
+
 ## Key conventions
 
 - **Naming**: `lowercase_separated_by_underscores` for all identifiers — classes, functions, methods, variables, enum values. Member variables use `m_` prefix, private members use `_` prefix.
@@ -292,34 +315,3 @@ separator, `margin: calc(1px + 2px) 0` carries the value separator, and
 depth-aware `find_last_combinator` for the same reason: `:nth-child(2n+1)` must
 not split at its `+`. If you add a new splitter, respect nesting or you will
 reintroduce a whole family of silent bugs.
-
-## dd build system
-
-This repo uses the vendored dd build system. dd has two modes.
-
-**CLI mode** is the default; each verb runs once and exits:
-
-```pwsh
-.\dd.ps1 test                  # build both configs and run the suite
-.\dd.ps1 build debug
-.\dd.ps1 doctor --json
-.\dd.ps1 commands --json       # list this project's own commands
-```
-
-**MCP mode** — `.\dd.ps1 mcp` turns the process into a stdio JSON-RPC server for an
-MCP client, adapting typed requests onto CLI mode. It owns stdout for protocol
-messages, so it prints no result envelope and rejects `--json`. Register it with
-`.\dd.ps1 ide --mcp`.
-
-Project settings live in `dd.psd1`; dependency pins live in
-`cmake/dd-dependencies.json` with `dependencies.owner = 'dd'`. Vendored dd file
-hashes are recorded in `docs/dd-upstream.json`.
-
-### Project commands
-
-Ported from the pre-dd driver; both declare `effects = 'read'`:
-
-```pwsh
-.\dd.ps1 layout --file test-files/wikipedia-main-page.html --width 1200
-.\dd.ps1 analyze-wiki-css
-```
