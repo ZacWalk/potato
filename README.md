@@ -44,7 +44,7 @@ uses the CMake and Ninja that ship with it.
 ```powershell
 .\dd.ps1 build        # both configurations
 .\dd.ps1 test         # build and run the suite
-.\dd.ps1 run          # build, then launch
+.\dd.ps1 launch       # build Release, then start the browser
 ```
 
 Output is `Exe\potato-64.exe`, or `potato-64d.exe` for Debug.
