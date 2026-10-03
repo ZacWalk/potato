@@ -984,10 +984,10 @@ namespace
 	// Combined self-test:
 	//   1. Runs the in-process unit tests (run_tests() from core.cpp) and
 	//      writes the HTML report to a temp file.
-	//   2. Synchronously fetches https://www.google.com and verifies a
-	//      successful HTTP response with non-empty body.
+	//   2. Unless offline, synchronously fetches a handful of live pages and
+	//      verifies each returns a successful HTTP response with a non-empty body.
 	// Prints progress to stdout. Returns 0 on success, non-zero on failure.
-	int run_self_test()
+	int run_self_test(const bool network)
 	{
 		int result = 0;
 
@@ -1111,6 +1111,12 @@ namespace
 			return 0;
 		};
 
+		if (!network)
+		{
+			pf::write_stdout("Network checks skipped (offline self-test).\n");
+			return result;
+		}
+
 		for (const auto url : {
 			     "http://example.com/",
 			     "https://example.com/",
@@ -1152,7 +1158,13 @@ app_init_result app_init(const pf::window_frame_ptr& main_frame,
 		if (p == "/test" || p == "--test" || p == "-test")
 		{
 			r.start_gui = false;
-			r.exit_code = run_self_test();
+			r.exit_code = run_self_test(true);
+			return r;
+		}
+		if (p == "/test-offline" || p == "--test-offline" || p == "-test-offline")
+		{
+			r.start_gui = false;
+			r.exit_code = run_self_test(false);
 			return r;
 		}
 		if (p.starts_with("/layout:") || p.starts_with("--layout:"))
