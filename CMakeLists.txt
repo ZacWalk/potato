@@ -119,4 +119,14 @@ if(BUILD_TESTING)
     add_executable(potato_tests tests/smoke.cpp)
     add_test(NAME potato_unit COMMAND potato_tests)
     set_tests_properties(potato_unit PROPERTIES TIMEOUT 30 LABELS potato)
+
+    add_test(NAME potato_selftest COMMAND potato --test-offline)
+    set_tests_properties(potato_selftest PROPERTIES
+        TIMEOUT 120 LABELS potato WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+    # The full self-test also fetches live pages, so it is labelled for the
+    # network rather than with the offline suite above.
+    add_test(NAME potato_network COMMAND potato --test)
+    set_tests_properties(potato_network PROPERTIES
+        TIMEOUT 180 LABELS network WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 endif()
