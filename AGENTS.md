@@ -122,9 +122,8 @@ src/potato/          — The browser. Implements what libwebvis asks for.
 .\dd.ps1 build debug
 ```
 
-`dd.ps1` locates Visual Studio with vswhere, enters the x64 MSVC environment,
-and falls back to the CMake and Ninja that ship with VS when neither is on
-PATH — so nothing extra needs installing.
+The vendored dd driver sets up the x64 MSVC environment itself, so no developer
+prompt is needed; `.\dd.ps1 doctor` reports anything missing.
 
 To drive CMake directly, from an x64 Developer PowerShell:
 
@@ -140,19 +139,21 @@ and `potato-64.exe`). Never point them at a shared name.
 Other commands:
 
 ```
-.\dd.ps1 run                       # build, then launch the browser
-.\dd.ps1 test                      # build, then run the regression gate
-.\dd.ps1 layout test-files\x.html --width:1902 --dump:4
-.\dd.ps1 clean                     # remove build/ and Exe/
+.\dd.ps1 launch                    # build Release, then start the browser
+.\dd.ps1 test --label potato       # build both configs, then the offline self-test
+.\dd.ps1 test                      # also the network self-test and a window smoke check
+.\dd.ps1 layout --file test-files\x.html --width 1902 --dump 4
+.\dd.ps1 clean --dry-run           # dd removes only build trees it can verify
 ```
 
 ## Testing
 
 **Never launch a visible window to verify a change** — a popping UI steals focus
-and disrupts other work on the machine. `.\dd.ps1 run` does exactly that, so it
-is a command for the human, not a verification step. Every mode below is
-windowless or offscreen, and every one writes to the console, so an agent can
-read the result directly. No mode requires a human to look at a screen.
+and disrupts other work on the machine. `.\dd.ps1 launch` does exactly that, and
+so does an unfiltered `.\dd.ps1 test`, whose smoke check opens the browser for a
+second; use `--label potato`. Every mode below is windowless or offscreen, and
+every one writes to the console, so an agent can read the result directly. No
+mode requires a human to look at a screen.
 
 All three attach to the parent console via `AttachConsole` and rebind the std
 handles, so output is readable either inline or redirected. The exe is a
@@ -202,12 +203,15 @@ dimensions do not**. Trust the dimensions; treat a single timing as noisy.
 
 ```
 Exe\potato-64.exe --test
+Exe\potato-64.exe --test-offline
 ```
 
 Runs the unit suite and writes an HTML report to `%TEMP%\potXXXX.tmp`; prints
 `Unit tests: PASS|FAIL` plus the report path. Exit `0`, or `10` on unit failure.
 It then fetches four live URLs, so it also fails when the network is down, for
-reasons unrelated to a change.
+reasons unrelated to a change. `--test-offline` stops after the unit suite; it is
+what `dd test --label potato` runs, while the full `--test` runs as
+`potato_network` under the `network` label.
 
 Two kinds of layout test live here. The **fixture** tests assert the exact size
 of the pages in `test-files/`; they silently skip when that folder is absent.
@@ -318,4 +322,4 @@ Ported from the pre-dd driver; both declare `effects = 'read'`:
 ```pwsh
 .\dd.ps1 layout --file test-files/wikipedia-main-page.html --width 1200
 .\dd.ps1 analyze-wiki-css
-```;
+```
