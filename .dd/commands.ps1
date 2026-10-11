@@ -91,7 +91,8 @@ function Invoke-DDGuiSmoke([string]$Binary, [string]$Root) {
     if (-not $IsWindows) { Stop-DD 'GUI smoke tests require Windows.' }
     $started = [DateTime]::UtcNow
     $process = Start-Process -FilePath $Binary -WorkingDirectory $Root -PassThru
-    $result = @{ status = 'failed'; binary = $Binary; title = '' }
+    $result = @{ configuration = 'gui smoke'; status = 'failed'; binary = $Binary; title = '' }
+    $shutdown = $null
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $wait = [Threading.ManualResetEvent]::new($false)
     try {
@@ -111,12 +112,17 @@ function Invoke-DDGuiSmoke([string]$Binary, [string]$Root) {
     finally {
         if (-not $process.HasExited) {
             $null = $process.CloseMainWindow()
-            if (-not $process.WaitForExit(4000)) { $process.Kill($true); $process.WaitForExit() }
+            if (-not $process.WaitForExit(4000)) {
+                $process.Kill($true); $process.WaitForExit()
+                $shutdown = 'GUI did not exit within 4 seconds of WM_CLOSE.'
+            }
+            elseif ($process.ExitCode -ne 0) { $shutdown = "GUI exited with code $($process.ExitCode) after WM_CLOSE." }
         }
         $reports = @(Get-ChildItem -LiteralPath $Root,(Split-Path $Binary) -File -Filter '*crash*' -ErrorAction SilentlyContinue | Where-Object LastWriteTimeUtc -ge $started)
         $process.Dispose()
         $wait.Dispose()
         if ($reports.Count) { Stop-DD "GUI produced a crash report: $($reports.FullName -join ', ')" 1 }
+        if ($shutdown -and $result.status -eq 'passed') { Stop-DD $shutdown 1 }
     }
     return $result
 }

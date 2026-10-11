@@ -15,8 +15,8 @@ include(FetchContent)
 include(ExternalProject)
 include("${CMAKE_CURRENT_SOURCE_DIR}/.dd/dependencies.cmake")
 dd_load_dependencies("${CMAKE_CURRENT_SOURCE_DIR}/cmake/dd-dependencies.json")
-@APP_CMAKE@
 include(CTest)
+@APP_CMAKE@
 if(BUILD_TESTING)
     add_executable(app_tests tests/smoke.cpp)
     add_test(NAME app_unit COMMAND app_tests)

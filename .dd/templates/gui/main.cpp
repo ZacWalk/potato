@@ -8,7 +8,12 @@ namespace
 class app_view final : public pf::frame_reactor
 {
 public:
-    uint32_t handle_message(pf::window_frame_ptr, pf::message_type, const pf::message_params&) override { return 0; }
+    uint32_t handle_message(pf::window_frame_ptr window, pf::message_type message, const pf::message_params&) override
+    {
+        // platform-h returns this result for WM_CLOSE without DefWindowProc.
+        if (message == pf::message_type::close) window->close();
+        return 0;
+    }
     void handle_size(pf::window_frame_ptr&, pf::isize, pf::measure_context&) override {}
     void handle_paint(pf::window_frame_ptr& frame, pf::draw_context& draw) override
     {
