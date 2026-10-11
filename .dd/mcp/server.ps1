@@ -34,7 +34,10 @@ function Stop-McpChild {
 function Receive-McpMessage([string]$Line) {
     try { $request = ConvertFrom-Json -InputObject $Line -AsHashtable -Depth 64 -ErrorAction Stop }
     catch { Write-McpError $null -32700 'Parse error'; return }
-    if ($request -isnot [Collections.IDictionary] -or $request.jsonrpc -cne '2.0' -or $request.method -isnot [string]) { Write-McpError $null -32600 'Invalid request'; return }
+    # JSON-RPC answers an invalid request with null only when its id cannot be read.
+    $readableId = if ($request -is [Collections.IDictionary] -and $request.Contains('id') -and
+        ($request.id -is [string] -or $request.id -is [int] -or $request.id -is [long])) { $request.id } else { $null }
+    if ($request -isnot [Collections.IDictionary] -or $request.jsonrpc -cne '2.0' -or $request.method -isnot [string]) { Write-McpError $readableId -32600 'Invalid request'; return }
     $hasId = $request.Contains('id')
     if ($hasId -and $request.id -isnot [string] -and $request.id -isnot [int] -and $request.id -isnot [long]) { Write-McpError $null -32600 'Request ID must be a string or integer'; return }
     if ($request.Contains('params') -and $request.params -isnot [Collections.IDictionary]) {

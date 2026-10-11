@@ -1,6 +1,5 @@
 function Invoke-DDStreamingProcess($Process, [string]$Directory, [int]$Timeout, [string]$Phase) {
-    $logDir = Join-Path ([IO.Path]::GetTempPath()) 'dd-logs'
-    [IO.Directory]::CreateDirectory($logDir) | Out-Null
+    $logDir = Get-DDLogDirectory
     $path = Join-Path $logDir ([guid]::NewGuid().ToString('N') + '.log')
     $writer = [IO.StreamWriter]::new($path, $false, [Text.UTF8Encoding]::new($false))
     $writer.AutoFlush = $true

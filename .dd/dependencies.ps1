@@ -55,12 +55,14 @@ function Resolve-DDDependencyCommit([string]$Root, [string]$Url, [string]$Ref) {
     # Catalog declarations carry no pin, so HEAD resolves the remote default branch and
     # the concrete commit is recorded in the project's own manifest.
     if ($Ref -ceq 'HEAD') {
-        $head = Invoke-DDGit $Root @('ls-remote', '--exit-code', '--', $Url, 'HEAD')
+        $head = Invoke-DDGit $Root @('ls-remote', '--exit-code', '--', $Url, 'HEAD') -AllowFailure
+        Assert-DDRemoteListed $head $Url
         foreach ($line in ($head.stdout -split '\r?\n')) { if ($line -match '^([0-9a-f]{40})\s+HEAD$') { return $Matches[1] } }
         Stop-DD "Remote HEAD not found for $Url" 5
     }
     $patterns = if ($Ref.StartsWith('refs/')) { @($Ref, "$Ref^{}") } else { @("refs/heads/$Ref", "refs/tags/$Ref", "refs/tags/$Ref^{}") }
-    $remote = Invoke-DDGit $Root (@('ls-remote', '--exit-code', '--', $Url) + $patterns)
+    $remote = Invoke-DDGit $Root (@('ls-remote', '--exit-code', '--', $Url) + $patterns) -AllowFailure
+    Assert-DDRemoteListed $remote $Url
     $refs = @{}
     foreach ($line in ($remote.stdout -split '\r?\n')) { if ($line -match '^([0-9a-f]{40})\s+(refs/\S+)$') { $refs[$Matches[2]] = $Matches[1] } }
     $branch = if ($Ref.StartsWith('refs/')) { $Ref } else { "refs/heads/$Ref" }
@@ -69,7 +71,16 @@ function Resolve-DDDependencyCommit([string]$Root, [string]$Url, [string]$Ref) {
     if ($refs.ContainsKey("$tag^{}")) { return $refs["$tag^{}"] }
     if ($refs.ContainsKey($tag)) { return $refs[$tag] }
     if ($refs.ContainsKey($branch)) { return $refs[$branch] }
-    Stop-DD "Remote ref not found: $Ref" 5
+    # Only names are resolved remotely, so an abbreviated commit can never match one.
+    $hint = if ($Ref -match '^[0-9a-fA-F]{4,39}$') { ' Give a commit as its full 40-character SHA; only branches and tags are resolved remotely.' } else { '' }
+    Stop-DD "Remote ref not found: $Ref.$hint" 5
+}
+
+# ls-remote --exit-code answers 2 when nothing matched, which the caller reports
+# as a missing ref; any other failure means the remote could not be listed at all.
+function Assert-DDRemoteListed($Result, [string]$Url) {
+    if ($Result.exitCode -in @(0, 2)) { return }
+    Stop-DD "Could not list the refs of $Url (git exit $($Result.exitCode)): $($Result.stderr.Trim())" 5
 }
 
 function Write-DDDependencyManifest([string]$Root, $Manifest, [string]$Original) {

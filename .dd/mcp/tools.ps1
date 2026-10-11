@@ -23,16 +23,16 @@ function Get-DDMcpTools {
         ref = $text; git = $text; url = $text; sha256 = @{ type = 'string'; pattern = '^[a-fA-F0-9]{64}$' }
         method = @{ type = 'string'; enum = @('fetchcontent','externalproject','application') }; apply = $apply
     } @('operation')
-    New-McpTool 'dd_build' 'Build through project CMake presets. Requires -AllowExecution for a trusted workspace.' @{
+    New-McpTool 'dd_build' 'Build through project CMake presets. Requires --allow-execution (dd mcp) for a trusted workspace.' @{
         project = $project; configuration = @{ type = 'string'; enum = @('debug','release','both'); default = 'both' }; apps = $applications
         jobs = @{ type = 'integer'; minimum = 1; maximum = 1024 }
     }
-    New-McpTool 'dd_test' 'Build both configurations and run selected CTest tests and applicable GUI smoke tests. Requires -AllowExecution.' @{ project = $project; apps = $applications; label = $text; name = $text }
-    New-McpTool 'dd_run' 'Build Release and run a target with exact arguments and a bounded timeout. Requires -AllowExecution.' @{
+    New-McpTool 'dd_test' 'Build both configurations and run selected CTest tests and applicable GUI smoke tests. Requires --allow-execution (dd mcp).' @{ project = $project; apps = $applications; label = $text; name = $text }
+    New-McpTool 'dd_run' 'Build Release and run a target with exact arguments and a bounded timeout. Requires --allow-execution (dd mcp).' @{
         project = $project; target = $identifier; args = $arguments; timeout = @{ type = 'integer'; minimum = 1; maximum = 9999; default = 120 }
     } @() $false $true
-    New-McpTool 'dd_launch' 'Build Release and start a persistent app with file-backed logs. Returns PID; app survives request and server exit. Requires -AllowExecution.' @{ project = $project; target = $identifier; args = $arguments } @() $false $true
-    New-McpTool 'dd_command' 'Run only a declared project script. Requires -AllowExecution even for previews. Writes require dryRun=false and apply=true. Discover via dd_commands first.' @{
+    New-McpTool 'dd_launch' 'Build Release and start a persistent app with file-backed logs. Returns PID; app survives request and server exit. Requires --allow-execution (dd mcp).' @{ project = $project; target = $identifier; args = $arguments } @() $false $true
+    New-McpTool 'dd_command' 'Run only a declared project script. Requires --allow-execution (dd mcp) even for previews. Writes require dryRun=false and apply=true. Discover via dd_commands first.' @{
         project = $project; name = $command; parameters = @{ type = 'object'; additionalProperties = @{ type = @('string','number','boolean') }; default = @{} }
         dryRun = @{ type = 'boolean'; default = $true }; apply = $apply
     } @('name') $false $true
@@ -70,7 +70,7 @@ function Convert-DDMcpCall($Parameters, [string]$Root, [bool]$AllowExecution) {
     foreach ($key in $schema.properties.Keys) {
         if (-not $values.Contains($key) -and $schema.properties[$key].ContainsKey('default')) { $values[$key] = $schema.properties[$key].default }
     }
-    if ($Parameters.name -in @('dd_build','dd_test','dd_run','dd_launch','dd_command') -and -not $AllowExecution) { throw 'Project code execution is disabled. Restart with -AllowExecution only for a trusted workspace.' }
+    if ($Parameters.name -in @('dd_build','dd_test','dd_run','dd_launch','dd_command') -and -not $AllowExecution) { throw 'Project code execution is disabled. Restart with --allow-execution (dd mcp) only for a trusted workspace.' }
     $needsManifest = $Parameters.name -in @('dd_commands','dd_targets','dd_build','dd_test','dd_run','dd_launch','dd_command') -or ($Parameters.name -eq 'dd_dependencies' -and $values.operation -ne 'available')
     $path = Get-DDMcpProject $Root $(if ($values.Contains('project')) { $values.project } else { '.' }) $needsManifest
     $arguments = [Collections.Generic.List[string]]::new()

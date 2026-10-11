@@ -3,7 +3,7 @@ function Get-DDCommandMetadata([string]$Root, $Manifest) {
     foreach ($name in ($Manifest.commands.Keys | Sort-Object)) {
         $definition = $Manifest.commands[$name]
         $parameters = if ($definition.parameters) { $definition.parameters } else { @{} }
-        $platforms = if ($definition.ContainsKey('platforms')) { @($definition.platforms) } else { @('x64-windows', 'x64-linux') }
+        $platforms = @(if ($definition.ContainsKey('platforms')) { $definition.platforms } else { 'x64-windows', 'x64-linux' })
         @{ name = $name; description = $definition.description; script = $definition.script; parameters = $parameters;
             effects = $definition.effects; supportsDryRun = [bool]$definition['supports-dry-run']; platforms = $platforms;
             timeoutSeconds = $(if ($definition.ContainsKey('timeout-secs')) { $definition['timeout-secs'] } else { 60 });
@@ -81,6 +81,7 @@ function Update-DDTargetLaunch([string]$Root, $Manifest, $Options) {
 }
 
 function Invoke-DDProjectCommand([string]$Root, $Manifest, [string]$Name, $Options) {
+    if (-not $Name) { Stop-DD 'No command given. Use dd help for the built-in commands and dd commands for this project''s.' }
     if (-not $Manifest.commands -or -not $Manifest.commands.ContainsKey($Name)) { Stop-DD "Unknown project command: $Name. Use dd commands." }
     $definition = $Manifest.commands[$Name]
     $definitions = if ($definition.parameters) { $definition.parameters } else { @{} }

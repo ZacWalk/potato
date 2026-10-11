@@ -23,7 +23,7 @@ function(dd_dependency_arguments manifest name output)
         endif()
         set(arguments GIT_REPOSITORY "${url}" GIT_TAG "${commit}" GIT_SHALLOW FALSE
             GIT_SUBMODULES "" GIT_SUBMODULES_RECURSE FALSE
-            GIT_CONFIG protocol.ext.allow=never protocol.file.allow=never core.hooksPath=/dev/null)
+            GIT_CONFIG protocol.ext.allow=never protocol.file.allow=never core.hooksPath=/dev/null core.longpaths=true)
     endif()
     if(url MATCHES "[;\"$\\ \t\r\n]")
         message(FATAL_ERROR "Invalid acquisition URL")

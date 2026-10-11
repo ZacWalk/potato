@@ -1,5 +1,5 @@
 $script:DDHome = $PSScriptRoot
-$script:DDVersion = '0.2.0'
+$script:DDVersion = '0.2.1'
 
 # Authoritative runtime inventory. Copy-DDRuntime, Invoke-DD, tools/prepare.ps1,
 # tools/package.ps1 and bootstrap.ps1 all derive their file lists from these.
@@ -20,6 +20,28 @@ function Stop-DD([string]$Message, [int]$Code = 2) {
     $exception = [InvalidOperationException]::new($Message)
     $exception.Data['exitCode'] = $Code
     throw $exception
+}
+
+# Every build and test step logs to %TEMP%\dd-logs, every test run leaves a JUnit
+# report in %TEMP%, and every launch leaves its output in %TEMP%\dd-launch. Nothing
+# removed them, so a busy machine collected thousands; the first call in each
+# process clears those older than two weeks. On Windows a launched app that still
+# holds its log open keeps it: the delete fails quietly.
+function Get-DDLogDirectory {
+    $temp = [IO.Path]::GetTempPath()
+    $directory = Join-Path $temp 'dd-logs'
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+    if (-not $script:DDLogsPruned) {
+        $script:DDLogsPruned = $true
+        $cutoff = [DateTime]::UtcNow.AddDays(-14)
+        $stale = @(Get-ChildItem -LiteralPath $directory -Filter '*.log' -File -ErrorAction SilentlyContinue) +
+            @(Get-ChildItem -LiteralPath (Join-Path $temp 'dd-launch') -Filter '*.log' -File -ErrorAction SilentlyContinue) +
+            @(Get-ChildItem -LiteralPath $temp -Filter 'dd-ctest-*.xml' -File -ErrorAction SilentlyContinue)
+        foreach ($file in $stale) {
+            if ($file.LastWriteTimeUtc -lt $cutoff) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    return $directory
 }
 
 function Read-DDOptions([string[]]$Arguments) {
@@ -365,8 +387,7 @@ function Invoke-DDProcess([string]$Tool, [string[]]$ToolArgs, [string]$Directory
         $errorOutput = $stderr.GetAwaiter().GetResult()
         $logPath = $null
         if ($Log) {
-            $logDir = Join-Path ([IO.Path]::GetTempPath()) 'dd-logs'
-            [IO.Directory]::CreateDirectory($logDir) | Out-Null
+            $logDir = Get-DDLogDirectory
             $logPath = Join-Path $logDir ([guid]::NewGuid().ToString('N') + '.log')
             [IO.File]::WriteAllText($logPath, $output + $errorOutput)
             if ($null -ne $script:DDLogs) { $script:DDLogs.Add($logPath) }
@@ -452,7 +473,12 @@ function New-DDProject($Options, [string]$Root) {
     if ($type -notin @('gui', 'cli', 'library')) { Stop-DD 'App type must be gui, cli or library.' }
     if ($type -eq 'gui' -and -not $IsWindows) { Stop-DD 'GUI scaffolding is Windows-only until platform-h supports Linux.' }
     $name = if ($Options.name) { $Options.name } else { Split-Path $Root -Leaf }
-    if ($name -notmatch '^[A-Za-z][A-Za-z0-9_-]*$') { Stop-DD 'Use --name with letters, numbers, hyphens or underscores, starting with a letter.' }
+    # The name becomes the CMake project, target and executable name, so it has to
+    # be usable as a file name: a device name such as con cannot be one, and a very
+    # long one pushes the build tree past the path-length limit.
+    if ($name -notmatch '^[A-Za-z][A-Za-z0-9_-]*$' -or $name.Length -gt 64 -or $name -match '^(con|prn|aux|nul|com[0-9]|lpt[0-9])$') {
+        Stop-DD 'Use --name with up to 64 letters, numbers, hyphens or underscores, starting with a letter; device names such as con and nul are reserved.'
+    }
     if (@(Get-ChildItem -LiteralPath $Root -Force | Where-Object Name -ne '.git').Count) { Stop-DD 'init requires an empty folder. Use dd adopt --dry-run to inspect an existing app.' }
     $gitRoot = Invoke-DDGit $Root @('rev-parse', '--show-toplevel') -AllowFailure
     if ($gitRoot.exitCode -eq 0 -and [IO.Path]::GetFullPath($gitRoot.stdout.Trim()) -ne $Root) { Stop-DD 'Cannot initialize inside another Git working tree.' }
@@ -551,9 +577,10 @@ function Invoke-DDCommand($Options) {
         'help' {
             Assert-DDOptions $Options @() 2
             if ($Options.words.Count -eq 2) {
+                $name = $Options.words[1]
+                if (-not $name) { Stop-DD 'dd help NAME needs the name of one of this project''s commands; dd help alone lists the built-in commands.' }
                 $root = Find-DDProject $root
                 $manifest = Read-DDManifest $root
-                $name = $Options.words[1]
                 $entry = @(Get-DDCommandMetadata $root $manifest | Where-Object name -eq $name)
                 if ($entry.Count -ne 1) { Stop-DD "No project command named $name. Use dd help for built-ins or dd commands." }
                 return $entry[0]
@@ -669,6 +696,22 @@ function Write-DDDiagnosticSummary($Diagnostics) {
 
 function Write-DDHumanResult($Data) {
     if ($null -eq $Data) { return }
+    # The top-level help, read by a person: a usage listing rather than its JSON.
+    if ($Data -is [Collections.IDictionary] -and $Data.Contains('version') -and $Data.Contains('commands') -and
+        $Data.Contains('options') -and @($Data.commands | Where-Object { $_ -isnot [string] }).Count -eq 0) {
+        Write-Host "dd $($Data.version) - $($Data.repository)"
+        Write-Host ''
+        Write-Host 'Usage: dd <command> [options]'
+        Write-Host ''
+        Write-Host 'Commands:'
+        foreach ($command in @($Data.commands)) { Write-Host "  $command" }
+        Write-Host ''
+        Write-Host 'Options:'
+        foreach ($option in @($Data.options)) { Write-Host "  $option" }
+        Write-Host ''
+        Write-Host 'dd help NAME describes one of this project''s commands; dd commands lists them.'
+        return
+    }
     if ($Data -is [Collections.IDictionary] -and $Data.Contains('results')) {
         foreach ($result in @($Data.results)) {
             Write-Host "$($result.configuration) $($result.status)"
