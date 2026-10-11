@@ -87,7 +87,7 @@ function Invoke-DDClean([string]$Root, $Options) {
     return @{ paths = @($paths); status = $(if ($Options['dry-run']) { 'planned' } else { 'cleaned' }) }
 }
 
-function Invoke-DDGuiSmoke([string]$Binary, [string]$Root) {
+function Invoke-DDGuiSmoke([string]$Binary, [string]$Root, [bool]$RequireExit = $true) {
     if (-not $IsWindows) { Stop-DD 'GUI smoke tests require Windows.' }
     $started = [DateTime]::UtcNow
     $process = Start-Process -FilePath $Binary -WorkingDirectory $Root -PassThru
@@ -110,6 +110,11 @@ function Invoke-DDGuiSmoke([string]$Binary, [string]$Root) {
         $result.status = 'passed'
     }
     finally {
+        if (-not $process.HasExited -and -not $RequireExit) {
+            # smoke = 'start': the app asks before it closes (a tray app), so a
+            # window that came up is all there is to check; end it.
+            $process.Kill($true); $process.WaitForExit()
+        }
         if (-not $process.HasExited) {
             $null = $process.CloseMainWindow()
             if (-not $process.WaitForExit(4000)) {
