@@ -446,6 +446,10 @@ public:
 	std::shared_ptr<media_query_list> m_media_query;
 	selector_key m_key;
 
+	// From the built-in user-agent stylesheet. The cascade weighs origin before
+	// specificity, so such a rule loses to every author rule.
+	bool m_user_agent = false;
+
 	css_selector(const std::shared_ptr<style>& s,
 	             const std::shared_ptr<media_query_list>& media) : m_style(s), m_media_query(media)
 	{
@@ -474,8 +478,14 @@ public:
 
 //////////////////////////////////////////////////////////////////////////
 
+// Cascade order, least significant last: origin (user agent below author),
+// then specificity, then source order.
 inline bool operator >(const css_selector& v1, const css_selector& v2)
 {
+	if (v1.m_user_agent != v2.m_user_agent)
+	{
+		return v2.m_user_agent;
+	}
 	if (v1.m_specificity == v2.m_specificity)
 	{
 		return v1.m_order > v2.m_order;
@@ -485,6 +495,10 @@ inline bool operator >(const css_selector& v1, const css_selector& v2)
 
 inline bool operator <(const css_selector& v1, const css_selector& v2)
 {
+	if (v1.m_user_agent != v2.m_user_agent)
+	{
+		return v1.m_user_agent;
+	}
 	if (v1.m_specificity == v2.m_specificity)
 	{
 		return v1.m_order < v2.m_order;
@@ -575,11 +589,17 @@ public:
 
 	void parse_stylesheet(const std::string& str, const std::string& baseurl, document& doc,
 	                      std::shared_ptr<media_query_list>& media);
+
+	// The built-in sheet: every rule it adds ranks below the author's.
+	void parse_user_agent_stylesheet(const std::string& str, document& doc,
+	                                 std::shared_ptr<media_query_list>& media);
 	void sort_selectors();
 
 	static std::string parse_css_url(const std::string& str);
 
 private:
+	bool m_parsing_user_agent = false;
+
 	void parse_atrule(const std::string& text, const std::string& baseurl, document& doc,
 	                  std::shared_ptr<media_query_list>& media);
 	void parse_selectors(const std::string& txt, const std::shared_ptr<style>& styles,
@@ -588,6 +608,7 @@ private:
 	void add_selector(const std::shared_ptr<css_selector>& selector)
 	{
 		selector->m_order = static_cast<int>(m_selectors.size());
+		selector->m_user_agent = m_parsing_user_agent;
 		m_selectors.push_back(selector);
 	}
 

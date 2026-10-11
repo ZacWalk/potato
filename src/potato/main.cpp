@@ -18,6 +18,137 @@ namespace
 	// The one host instance, handed to libwebvis before any document exists.
 	potato_host g_host;
 
+	// "caf%C3%A9" -> "café". Links percent-encode a fragment, but ids and names
+	// are written out literally.
+	std::string percent_decode(const std::string_view text)
+	{
+		const auto hex = [](const char c) -> int
+		{
+			if (c >= '0' && c <= '9') return c - '0';
+			if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+			if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+			return -1;
+		};
+
+		std::string result;
+		result.reserve(text.size());
+
+		for (size_t i = 0; i < text.size(); ++i)
+		{
+			if (text[i] == '%' && i + 2 < text.size())
+			{
+				const int hi = hex(text[i + 1]);
+				const int lo = hex(text[i + 2]);
+				if (hi >= 0 && lo >= 0)
+				{
+					result.push_back(static_cast<char>(hi * 16 + lo));
+					i += 2;
+					continue;
+				}
+			}
+			result.push_back(text[i]);
+		}
+
+		return result;
+	}
+
+	// Splits "page#name" into the document and the fragment that points into it.
+	std::pair<std::string, std::string> split_fragment(const std::string& url)
+	{
+		const auto hash = url.find('#');
+		if (hash == std::string::npos) return {url, {}};
+		return {url.substr(0, hash), url.substr(hash + 1)};
+	}
+
+	bool is_web_url(const std::string_view url)
+	{
+		return (url.size() >= 7 && _strnicmp(url.data(), "http://", 7) == 0) ||
+			(url.size() >= 8 && _strnicmp(url.data(), "https://", 8) == 0);
+	}
+
+	// True when two URLs name the same document, whatever their fragments. A
+	// local path is compared as a path: its separators and case depend on how
+	// it was typed or resolved.
+	bool same_document(std::string_view a, std::string_view b)
+	{
+		a = a.substr(0, a.find('#'));
+		b = b.substr(0, b.find('#'));
+		if (is_web_url(a) || is_web_url(b)) return a == b;
+		if (a.size() != b.size()) return false;
+
+		const auto fold = [](const char c)
+		{
+			return c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		};
+
+		for (size_t i = 0; i < a.size(); ++i)
+			if (fold(a[i]) != fold(b[i])) return false;
+		return true;
+	}
+
+	// RFC 3986 scheme followed by ':'. "c:" is a drive letter and "host:8080" a
+	// port, neither a scheme.
+	bool has_scheme(const std::string_view text)
+	{
+		const auto colon = text.find(':');
+		if (colon == std::string_view::npos || colon < 2) return false;
+		if (!std::isalpha(static_cast<unsigned char>(text[0]))) return false;
+
+		for (size_t i = 1; i < colon; ++i)
+		{
+			const auto c = static_cast<unsigned char>(text[i]);
+			if (!std::isalnum(c) && c != '+' && c != '-' && c != '.') return false;
+		}
+
+		const auto rest = text.substr(colon + 1);
+		const auto port = rest.substr(0, rest.find('/'));
+		const bool is_port = !port.empty() &&
+			std::all_of(port.begin(), port.end(), [](const char c) { return c >= '0' && c <= '9'; });
+		return !is_port;
+	}
+
+	std::string html_escape(const std::string_view text)
+	{
+		std::string result;
+		result.reserve(text.size());
+
+		for (const auto c : text)
+		{
+			switch (c)
+			{
+			case '&': result += "&amp;";
+				break;
+			case '<': result += "&lt;";
+				break;
+			case '>': result += "&gt;";
+				break;
+			case '"': result += "&quot;";
+				break;
+			default: result.push_back(c);
+				break;
+			}
+		}
+
+		return result;
+	}
+
+	// "text/plain; charset=utf-8" names plain text, whatever its parameters.
+	bool is_plain_text(const std::string_view content_type)
+	{
+		auto media = content_type.substr(0, content_type.find(';'));
+		while (!media.empty() && media.back() == ' ') media.remove_suffix(1);
+		while (!media.empty() && media.front() == ' ') media.remove_prefix(1);
+		return is_equal(media, "text/plain");
+	}
+
+	// A text file is shown as it is: its markup characters are escaped rather
+	// than parsed, and its line breaks kept.
+	std::string plain_text_page(const std::string_view bytes, const std::string_view content_type)
+	{
+		return "<html><body><pre style=\"white-space:pre-wrap\">" +
+			html_escape(decode_to_utf8(bytes, content_type)) + "</pre></body></html>";
+	}
+
 	// ── Content area ──────────────────────────────────────────────────────
 	// Reactor for the blank content child window. Paints a white background
 	// and centres a placeholder label.
@@ -31,8 +162,14 @@ namespace
 		std::function<void(const std::string&)> _on_diagnostic;
 		std::function<void(const std::string&, const std::string&)> _on_resource_started;
 		std::function<void(const std::string&, const std::string&, bool)> _on_resource_finished;
-		int _last_layout_width = 0;
+		int _last_layout_width = 0; // width the document was laid out at; 0 forces a new layout
+		int _last_viewport_w = 0; // viewport width that layout was made for
 		int _layout_pass = 0;
+
+		// Fragment of the URL on screen. It is re-applied after every layout, so
+		// a late stylesheet or image cannot push its target out of view, and is
+		// dropped as soon as the reader scrolls for themselves.
+		std::string _anchor;
 
 		// Scrolling state.
 		int _scroll_y = 0; // current scroll offset (document pixels)
@@ -43,6 +180,7 @@ namespace
 
 		static constexpr int k_scrollbar_w = 14;
 		static constexpr int k_wheel_step = 60;
+		static constexpr int k_line_step = 40;
 
 	public:
 		void set_frame(pf::window_frame_ptr f) { _frame = std::move(f); }
@@ -79,15 +217,28 @@ namespace
 			_on_resource_finished = std::move(f);
 		}
 
-		void load_html(const std::string& url, const std::string& html, const std::string& content_type = {})
+		void load_html(const std::string& url, const std::string& html, const std::string& content_type = {},
+		               const std::string& anchor = {})
 		{
 			_last_layout_width = 0;
 			_scroll_y = 0;
 			_content_height = 0;
+			_anchor = anchor;
 			_doc.reset();
 			if (!html.empty())
 				_doc = document::create_from_bytes(*this, url, html, content_type);
 			if (_frame) _frame->invalidate();
+		}
+
+		bool has_document() const { return _doc != nullptr; }
+
+		// Navigation within the page on screen: scroll to the fragment's target
+		// rather than load the document again. No fragment means the top.
+		void scroll_to_anchor(const std::string& anchor)
+		{
+			_anchor = anchor;
+			if (_anchor.empty()) scroll_to(0);
+			else apply_anchor();
 		}
 
 		// ── view_host ──
@@ -177,6 +328,30 @@ namespace
 			if (_scroll_y != old && _frame) _frame->invalidate();
 		}
 
+		// Scrolling the reader asked for: the fragment stops holding the view.
+		void user_scroll_to(const int y)
+		{
+			_anchor.clear();
+			scroll_to(y);
+		}
+
+		// Positions are only known once the document has been laid out, so this
+		// is a no-op until then and do_layout applies it.
+		void apply_anchor()
+		{
+			if (!_doc || _anchor.empty() || _last_layout_width == 0) return;
+
+			int y = _doc->anchor_top(_anchor);
+			if (y < 0)
+			{
+				// Links percent-encode a fragment; ids are written out literally.
+				const auto decoded = percent_decode(_anchor);
+				if (decoded != _anchor) y = _doc->anchor_top(decoded);
+			}
+			if (y < 0 && icmp(_anchor, "top") == 0) y = 0;
+			if (y >= 0) scroll_to(y);
+		}
+
 	public:
 		// ── pf::frame_reactor ──
 		uint32_t handle_message(pf::window_frame_ptr, const pf::message_type m,
@@ -207,7 +382,7 @@ namespace
 				if (has_sb)
 				{
 					// wheel_delta is multiples of 120; positive = up.
-					scroll_to(_scroll_y - (p.wheel_delta * k_wheel_step) / 120);
+					user_scroll_to(_scroll_y - (p.wheel_delta * k_wheel_step) / 120);
 					return 1;
 				}
 				return 0;
@@ -222,7 +397,7 @@ namespace
 					const int max_scroll = std::max(0, _content_height - _viewport_h);
 					const int rel = p.point.y - track.top - _drag_offset;
 					const int span = std::max(1, track_h - thumb_h);
-					scroll_to(mul_div(rel, max_scroll, span));
+					user_scroll_to(mul_div(rel, max_scroll, span));
 					return 1;
 				}
 				if (m == pf::mouse_message_type::left_button_up)
@@ -243,6 +418,7 @@ namespace
 			{
 				if (thumb.contains(p.point))
 				{
+					_anchor.clear();
 					_dragging_thumb = true;
 					_drag_offset = p.point.y - thumb.top;
 					_frame->set_capture();
@@ -251,8 +427,8 @@ namespace
 				{
 					// Page up / page down on track click.
 					const int delta = std::max(40, _viewport_h - 20);
-					if (p.point.y < thumb.top) scroll_to(_scroll_y - delta);
-					else scroll_to(_scroll_y + delta);
+					if (p.point.y < thumb.top) user_scroll_to(_scroll_y - delta);
+					else user_scroll_to(_scroll_y + delta);
 				}
 				return 1;
 			}
@@ -337,12 +513,38 @@ namespace
 		uint32_t handle_keyboard(pf::window_frame_ptr, const pf::keyboard_message_type t,
 		                         const pf::keyboard_params& p) override
 		{
-			if (t == pf::keyboard_message_type::key_down && p.vk == pf::platform_key::F3)
+			if (t != pf::keyboard_message_type::key_down) return 0;
+
+			if (p.vk == pf::platform_key::F3)
 			{
 				if (_on_focus_address) _on_focus_address();
 				return 1;
 			}
-			return 0;
+
+			// The page takes the focus when clicked, so it answers the usual
+			// scrolling keys.
+			if (!_doc || !_frame) return 0;
+			const int page = std::max(40, _viewport_h - 40);
+			const bool shift = _frame->is_key_down(pf::platform_key::Shift);
+
+			switch (p.vk)
+			{
+			case pf::platform_key::Up: user_scroll_to(_scroll_y - k_line_step);
+				return 1;
+			case pf::platform_key::Down: user_scroll_to(_scroll_y + k_line_step);
+				return 1;
+			case pf::platform_key::Prior: user_scroll_to(_scroll_y - page);
+				return 1;
+			case pf::platform_key::Next: user_scroll_to(_scroll_y + page);
+				return 1;
+			case pf::platform_key::Space: user_scroll_to(_scroll_y + (shift ? -page : page));
+				return 1;
+			case pf::platform_key::Home: user_scroll_to(0);
+				return 1;
+			case pf::platform_key::End: user_scroll_to(_content_height);
+				return 1;
+			default: return 0;
+			}
 		}
 
 		// Layout needs no draw context, so it can run without a window.
@@ -351,9 +553,14 @@ namespace
 			if (!_doc) return;
 
 			_viewport_h = avail_h;
-			int layout_w = avail_w;
 
-			if (_last_layout_width == layout_w) return;
+			// A page taller than the viewport is laid out narrower than it, to
+			// leave room for the scrollbar, so the layout is cached against the
+			// viewport width it was made for rather than its own width; keyed on
+			// its own width, every paint laid the whole document out twice.
+			if (_last_layout_width != 0 && _last_viewport_w == avail_w) return;
+
+			int layout_w = avail_w;
 
 			_doc->client_pos(position(0, 0, layout_w, _viewport_h));
 			_doc->render(layout_w);
@@ -368,12 +575,14 @@ namespace
 			}
 
 			_last_layout_width = layout_w;
+			_last_viewport_w = avail_w;
 			clamp_scroll();
 			++_layout_pass;
 			diagnostic(std::format("Layout {}: viewport={}x{}, document={}x{}",
 			                       _layout_pass, avail_w, _viewport_h,
 			                       _doc->width(), _doc->height()));
 			_doc->diagnose_layout();
+			apply_anchor();
 		}
 
 		void handle_paint(pf::window_frame_ptr& frame, pf::draw_context& dc) override
@@ -486,6 +695,35 @@ namespace
 			return pf::file_path(path);
 		}
 
+		// What a person types into the address bar is not a reference relative
+		// to the page on screen: "example.com" names a site, not a sibling of the
+		// current document. Keep anything with a scheme or that names a local
+		// file, and treat the rest as a host name.
+		static std::string typed_url(const std::string_view text)
+		{
+			const auto first = text.find_first_not_of(" \t\r\n");
+			if (first == std::string_view::npos) return {};
+			std::string url(text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1));
+
+			if (has_scheme(url))
+			{
+				const auto colon = url.find(':');
+				for (size_t i = 0; i < colon; ++i)
+					url[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(url[i])));
+				return url;
+			}
+
+			const bool drive_path = url.size() >= 2 && std::isalpha(static_cast<unsigned char>(url[0])) &&
+				url[1] == ':';
+			if (drive_path || pf::file_path::is_path_sep(url[0])) return url;
+
+			// A path relative to the working directory, as on a command line.
+			if (const auto local = absolute_file_path(url); local.exists())
+				return std::string(local.view());
+
+			return "https://" + url;
+		}
+
 		void open_local_file(const pf::file_path& path)
 		{
 			if (!path.empty() && path.exists())
@@ -494,7 +732,11 @@ namespace
 
 		void choose_local_file()
 		{
-			open_local_file(pf::open_file_path("Open HTML file", {}));
+			// Embedded nulls separate the filter pairs, so the length is explicit.
+			static constexpr char filter_text[] =
+				"Web pages (*.htm, *.html)\0*.htm;*.html;*.xhtml\0Text files (*.txt)\0*.txt\0All files (*.*)\0*.*\0\0";
+			constexpr std::string_view filters(filter_text, sizeof(filter_text) - 1);
+			open_local_file(pf::open_file_path("Open HTML file", filters));
 		}
 
 		void open_dropped_files(const std::span<const pf::file_path> paths)
@@ -554,12 +796,16 @@ namespace
 			return result;
 		}
 
-		void navigate(const std::string& url)
+		// Follows a link or opens a URL the browser itself chose. A link from a
+		// document arrives already resolved; resolving again is harmless.
+		void navigate(const std::string& url, const bool relative_to_page = true)
 		{
-			// Resolve relative URLs against the currently loaded page.
 			std::string target = url;
-			if (!_current_url.empty())
-				target = pf::resolve_url(_current_url, url);
+			if (relative_to_page && !_current_url.empty())
+			{
+				auto resolved = pf::resolve_url(_current_url, url);
+				if (!resolved.empty()) target = std::move(resolved);
+			}
 
 			// Truncate forward history when navigating from the middle.
 			if (_history_pos + 1 < _history.size())
@@ -571,9 +817,68 @@ namespace
 				_history_pos = _history.size() - 1;
 			}
 
-			if (_toolbar) _toolbar->set_address_text(target);
-			load(target);
+			show(target, false);
+		}
+
+		// What the address bar hands over on Enter.
+		void navigate_typed(const std::string& text)
+		{
+			const auto url = typed_url(text);
+
+			if (url.empty())
+			{
+				if (_toolbar && !_history.empty()) _toolbar->set_address_text(_history[_history_pos]);
+				return;
+			}
+
+			navigate(url, false);
+		}
+
+		// Shows a history entry. A fragment of the document already on screen
+		// only scrolls; anything else loads. Moving through history between
+		// entries of one document scrolls too, the way following its links did.
+		void show(const std::string& url, const bool traversal)
+		{
+			if (_toolbar) _toolbar->set_address_text(url);
+
+			const bool in_page = _content_reactor && _content_reactor->has_document() && !_pending &&
+				(traversal || url.find('#') != std::string::npos) && same_document(url, _current_url);
+
+			if (in_page)
+			{
+				_current_url = url;
+				_content_reactor->scroll_to_anchor(split_fragment(url).second);
+			}
+			else
+			{
+				load(url);
+			}
+
 			update_buttons();
+		}
+
+		// Loads the current entry again without touching the history around it.
+		void reload()
+		{
+			if (_history.empty()) return;
+			const auto url = _history[_history_pos];
+			if (_toolbar) _toolbar->set_address_text(url);
+			load(url);
+		}
+
+		// Shows why `url` could not be displayed, so the address bar never names
+		// something other than what the content area shows. The error page is
+		// what the navigation ends in, so --eval stops after its quiet period
+		// instead of waiting out the 60-second cap and reporting a timeout.
+		void show_error(const std::string& url, const std::string_view title, const std::string_view detail)
+		{
+			_current_url = url;
+			std::string html = "<html><head><title>" + html_escape(title) + "</title></head><body><h2>" +
+				html_escape(title) + "</h2><p>" + html_escape(url) + "</p>";
+			if (!detail.empty()) html += "<pre>" + html_escape(detail) + "</pre>";
+			html += "</body></html>";
+			_content_reactor->load_html(url, html);
+			_eval_page_loaded = true;
 		}
 
 		void load(const std::string& url)
@@ -589,24 +894,52 @@ namespace
 			}
 			++_load_token;
 
-			if (url == "res://test.htm" || url == "about:blank")
+			const auto [doc_url, fragment] = split_fragment(url);
+
+			if (doc_url == "res://test.htm" || doc_url == "about:blank")
 			{
 				_current_url = url;
-				_content_reactor->load_html(url, std::string(pf::embedded_resource_text("test.htm")));
-				return;
-			}
-
-			const auto local_path = absolute_file_path(url);
-			if (local_path.exists())
-			{
-				const auto path = std::string(local_path.view());
-				_current_url = path;
-				_content_reactor->load_html(path, get_file_contents(path), "text/html");
+				_content_reactor->load_html(doc_url, std::string(pf::embedded_resource_text("test.htm")), {},
+				                            fragment);
+				// Loaded synchronously, like a local file; without this --eval of the
+				// built-in page waited out its 60-second cap.
 				_eval_page_loaded = true;
 				return;
 			}
 
-			if (url.starts_with("http://") || url.starts_with("https://"))
+			if (!is_web_url(url))
+			{
+				// A folder may itself contain '#', so the whole string is tried as a
+				// path before its tail is read as a fragment.
+				const std::pair<std::string, std::string> candidates[] = {{url, {}}, {doc_url, fragment}};
+
+				for (const auto& [candidate, anchor] : candidates)
+				{
+					if (candidate.empty()) continue;
+					const auto local_path = absolute_file_path(candidate);
+
+					if (pf::is_directory(local_path))
+					{
+						show_error(url, "Cannot open a folder", {});
+						return;
+					}
+
+					if (!local_path.exists()) continue;
+
+					const auto path = std::string(local_path.view());
+					_current_url = url;
+					auto bytes = get_file_contents(path);
+					if (path.size() >= 4 && is_equal(std::string_view(path).substr(path.size() - 4), ".txt"))
+						_content_reactor->load_html(path, plain_text_page(bytes, {}), "text/html; charset=utf-8",
+						                            anchor);
+					else
+						_content_reactor->load_html(path, bytes, "text/html", anchor);
+					_eval_page_loaded = true;
+					return;
+				}
+			}
+
+			if (is_web_url(url))
 			{
 				if (!_http)
 					_http = pf::create_async_http_session("Potato/1.0");
@@ -652,10 +985,16 @@ namespace
 					});
 				};
 
-				_pending = _http->get(url, std::move(cb));
+				// The fragment is for the browser, never the server.
+				_pending = _http->get(doc_url, std::move(cb));
+				if (!_pending) show_error(url, "Failed to load", "The request could not be started.");
+				return;
 			}
 
-			// Unknown scheme: keep the current page rather than blanking it.
+			if (has_scheme(url))
+				show_error(url, "Cannot open this address", "Potato opens http, https and local files.");
+			else
+				show_error(url, "File not found", {});
 		}
 
 		void on_download_complete(const uint64_t token, const std::string& url,
@@ -672,17 +1011,18 @@ namespace
 			{
 				eval_log(std::format("Navigation failed: {}: {}", url,
 				                     error.empty() ? "empty response" : error));
-				const std::string msg = error.empty() ? std::string("(empty response)") : error;
-				const std::string html =
-					"<html><body><h2>Failed to load</h2><p>" + url + "</p><pre>" + msg + "</pre></body></html>";
-				_current_url = url;
-				_content_reactor->load_html(url, html);
+				show_error(url, "Failed to load", error.empty() ? std::string("(empty response)") : error);
 				return;
 			}
 
 			_current_url = url;
 			eval_log(std::format("Navigation downloaded: {} bytes: {}", body.size(), url));
-			_content_reactor->load_html(url, body, content_type);
+			const auto [doc_url, fragment] = split_fragment(url);
+			if (is_plain_text(content_type))
+				_content_reactor->load_html(doc_url, plain_text_page(body, content_type), "text/html; charset=utf-8",
+				                            fragment);
+			else
+				_content_reactor->load_html(doc_url, body, content_type, fragment);
 			_eval_page_loaded = true;
 		}
 
@@ -690,23 +1030,22 @@ namespace
 		{
 			if (!can_go_back()) return;
 			--_history_pos;
-			if (_toolbar) _toolbar->set_address_text(_history[_history_pos]);
-			load(_history[_history_pos]);
-			update_buttons();
+			show(_history[_history_pos], true);
 		}
 
 		void go_forward()
 		{
 			if (!can_go_forward()) return;
 			++_history_pos;
-			if (_toolbar) _toolbar->set_address_text(_history[_history_pos]);
-			load(_history[_history_pos]);
-			update_buttons();
+			show(_history[_history_pos], true);
 		}
 
 		void initialise(const pf::window_frame_ptr& main_frame)
 		{
 			if (_toolbar) return; // already built
+
+			// app_init runs before the window exists, so a caption set there is lost.
+			main_frame->set_text("Potato");
 
 			// ── Toolbar ──
 			pf::address_bar_config cfg;
@@ -725,11 +1064,7 @@ namespace
 			});
 			cfg.left_buttons.push_back({
 				pf::icon_glyph::refresh, 3, "Refresh",
-				[this]
-				{
-					if (_toolbar)
-						navigate(_toolbar->address_text());
-				},
+				[this] { reload(); },
 				{}
 			});
 			cfg.left_buttons.push_back({
@@ -742,7 +1077,7 @@ namespace
 				pf::icon_glyph::menu, 5, "Menu", {}, {}
 			});
 
-			cfg.on_navigate = [this](const std::string& url) { navigate(url); };
+			cfg.on_navigate = [this](const std::string& text) { navigate_typed(text); };
 			cfg.on_suggest = [this](const std::string_view text) { return suggest(text); };
 
 			_toolbar = main_frame->create_address_bar(cfg);
@@ -750,12 +1085,9 @@ namespace
 			// Attach a hamburger menu to the right-hand "menu" button.
 			// Browser-utility items only (no curated bookmarks).
 			std::vector<pf::menu_command> menu_items;
-			menu_items.emplace_back("Back", 0, [this] { go_back(); });
-			menu_items.emplace_back("Forward", 0, [this] { go_forward(); });
-			menu_items.emplace_back("Reload", 0, [this]
-			{
-				if (_toolbar) navigate(_toolbar->address_text());
-			});
+			menu_items.emplace_back("Back", 0, [this] { go_back(); }, [this] { return can_go_back(); });
+			menu_items.emplace_back("Forward", 0, [this] { go_forward(); }, [this] { return can_go_forward(); });
+			menu_items.emplace_back("Reload", 0, [this] { reload(); });
 			menu_items.emplace_back(); // separator (empty text)
 			menu_items.emplace_back("Home", 0, [this] { navigate("about:blank"); });
 			menu_items.emplace_back("Test page", 0, [this] { navigate("res://test.htm"); });
@@ -813,7 +1145,8 @@ namespace
 					eval_log(std::format("Evaluation started: {}", _eval_url));
 					main_frame->set_timer(k_eval_timer, 500);
 				}
-				navigate(_startup_url);
+				// A URL on the command line is read the way the address bar reads it.
+				navigate_typed(_startup_url);
 			}
 			else
 			{
@@ -849,6 +1182,13 @@ namespace
 			if (m == pf::message_type::close)
 			{
 				if (frame) frame->close();
+				return 0;
+			}
+			// Windows gives the frame itself the focus whenever it is activated,
+			// and the frame has nothing to type into, so hand it to the page.
+			if (m == pf::message_type::set_focus)
+			{
+				if (_content) _content->set_focus();
 				return 0;
 			}
 			if (m == pf::message_type::drop_files)
@@ -918,15 +1258,97 @@ namespace
 
 // ── App entry points ──────────────────────────────────────────────────────
 
-// Defined in core.cpp — runs the registered in-process unit tests and
-// returns an HTML report. Failed cases contain the substring "FAILED".
-namespace webvis
-{
-	extern std::string run_tests();
-}
-
 namespace
 {
+	// The browser's own cases, run in the same table as the engine's
+	// (webvis::run_tests) by the self-test.
+	void register_shell_tests(webvis::tests& t)
+	{
+		t.register_test("Shell: typed text with a scheme, a drive or a port", []
+		{
+			should::equal(true, has_scheme("https://example.com/"), "https");
+			should::equal(true, has_scheme("about:blank"), "about");
+			should::equal(true, has_scheme("res://test.htm"), "res");
+			should::equal(false, has_scheme("c:\\pages\\a.html"), "drive letter");
+			should::equal(false, has_scheme("localhost:8080/a"), "port");
+			should::equal(false, has_scheme("example.com"), "bare host");
+		});
+
+		t.register_test("Shell: same document whatever the fragment", []
+		{
+			should::equal(true, same_document("https://a.test/p#x", "https://a.test/p#y"), "fragments");
+			should::equal(false, same_document("https://a.test/p", "https://a.test/q"), "other page");
+			should::equal(false, same_document("https://a.test/P", "https://a.test/p"), "web paths keep case");
+			should::equal(true, same_document("C:\\Dir\\Page.html#a", "c:/dir/page.html"), "local path");
+		});
+
+		t.register_test("Shell: fragments are percent-decoded", []
+		{
+			should::equal("caf\xC3\xA9", percent_decode("caf%C3%A9"), "UTF-8");
+			should::equal("%zz and %4", percent_decode("%zz and %4"), "not an escape");
+		});
+
+		t.register_test("Shell: CSS generic font families name installed faces", []
+		{
+			should::equal("Consolas", windows_face("monospace"), "monospace");
+			should::equal("Consolas", windows_face(" Monospace "), "case and spaces");
+			should::equal("Arial", windows_face("sans-serif"), "sans-serif");
+			should::equal("Times New Roman", windows_face("serif"), "serif");
+			should::equal("Segoe UI", windows_face("Segoe UI"), "a face is kept");
+		});
+
+		// text/plain used to be parsed as HTML: <b> turned bold and lines ran together.
+		t.register_test("Shell: plain text is shown, not parsed", []
+		{
+			should::equal(true, is_plain_text("text/plain; charset=utf-8"), "with a charset");
+			should::equal(true, is_plain_text(" Text/Plain "), "case and spaces");
+			should::equal(false, is_plain_text("text/html"), "html");
+			should::equal(false, is_plain_text(""), "no type");
+
+			const auto page = plain_text_page("a <b>c</b>\n\xE9", "text/plain; charset=iso-8859-1");
+			should::EqualTrue(page.find("a &lt;b&gt;c&lt;/b&gt;\n\xC3\xA9") != std::string::npos,
+			                  "escaped, decoded, line break kept");
+		});
+
+		// Downloads land in %TEMP%; every way a download can end must delete
+		// its file. A download cancelled at exit used to leave it behind.
+		t.register_test("Shell: a scratch file lives until its last owner lets go", []
+		{
+			auto scratch = scratch_file::create("pts");
+			should::EqualTrue(scratch != nullptr, "created");
+			const std::string body = "body";
+			scratch->write(reinterpret_cast<const uint8_t*>(body.data()), body.size());
+			scratch->close();
+			const auto path = scratch->path();
+			should::equal(body, get_file_contents(path), "readable once closed");
+
+			auto reader = scratch; // the completion's copy
+			scratch.reset();
+			should::EqualTrue(pf::file_path(path).exists(), "kept while the completion holds it");
+			reader.reset();
+			should::EqualTrue(!pf::file_path(path).exists(), "deleted by the last owner");
+		});
+
+		t.register_test("Shell: an abandoned scratch file goes at once, and only once", []
+		{
+			auto scratch = scratch_file::create("pts");
+			should::EqualTrue(scratch != nullptr, "created");
+			const auto path = scratch->path();
+
+			scratch->discard();
+			should::EqualTrue(!pf::file_path(path).exists(), "discard deletes");
+			const std::string late = "late";
+			scratch->write(reinterpret_cast<const uint8_t*>(late.data()), late.size());
+			should::EqualTrue(!pf::file_path(path).exists(), "a late write is dropped");
+
+			// The system may hand the freed name to the next download.
+			should::EqualTrue(pf::open_file_for_write(pf::file_path(path)) != nullptr, "name reused");
+			scratch.reset();
+			const bool survived = pf::file_path(path).exists();
+			pf::platform_delete_file(pf::file_path(path));
+			should::EqualTrue(survived, "the old owner leaves the reused name alone");
+		});
+	}
 	// Headless layout of a local HTML file. No window and no message loop, so
 	// no async resource can ever land and the result is repeatable. Prints
 	// "<file>: <w>x<h>" plus stage timings, structure and layout anomalies.
@@ -982,7 +1404,8 @@ namespace
 	}
 
 	// Combined self-test:
-	//   1. Runs the in-process unit tests (run_tests() from core.cpp) and
+	//   1. Runs the in-process unit tests (run_tests() from core.cpp, plus the
+	//      browser's own from register_shell_tests) and
 	//      writes the HTML report to a temp file.
 	//   2. Unless offline, synchronously fetches a handful of live pages and
 	//      verifies each returns a successful HTTP response with a non-empty body.
@@ -993,7 +1416,7 @@ namespace
 
 		// 1. Unit tests
 		pf::write_stdout("Potato self-test: running unit tests ...\n");
-		const auto report = run_tests();
+		const auto report = run_tests(register_shell_tests);
 		const auto report_path = pf::platform_temp_file_path("potato_tests_");
 		if (const auto out = pf::open_file_for_write(pf::file_path{report_path}))
 		{
@@ -1141,8 +1564,11 @@ app_init_result app_init(const pf::window_frame_ptr& main_frame,
 
 	// libwebvis reaches the machine through this host, so it has to be in
 	// place before anything creates a document — including the CLI modes.
+	// Only the window opens the network: without it every resource request
+	// fails at once, which keeps --layout and the self-test offline, instead
+	// of fetching images whose results can never land and whose scratch files
+	// were left behind in %TEMP%.
 	webvis::set_host(&g_host);
-	g_host.open_network("potato/1.0");
 
 	std::string eval_url;
 	std::string startup_url;
@@ -1216,9 +1642,10 @@ app_init_result app_init(const pf::window_frame_ptr& main_frame,
 
 	if (main_frame)
 	{
+		g_host.open_network("potato/1.0");
+
 		// Evaluation runs are automated, so keep their window off the desktop.
 		r.offscreen_gui = !eval_url.empty();
-		main_frame->set_text("Potato");
 		if (!eval_url.empty()) startup_url = eval_url;
 		const auto reactor = std::make_shared<main_frame_reactor>(std::move(startup_url), !eval_url.empty());
 		reactor->attach(main_frame);

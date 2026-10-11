@@ -996,6 +996,34 @@ static position should_box_of(const std::string& html, const char* id, const int
 	return layout_html_headless_probe(html, width, id);
 }
 
+// Lays out a snippet and hands the element carrying the given id to `check`,
+// for the computed values a box cannot show.
+static void should_check_element(const std::string& html, const char* id,
+                                 const std::function<void(element&)>& check)
+{
+	silent_view view;
+	const auto doc = document::create_from_bytes(view, "https://example.invalid/", html, "text/html");
+	should::EqualTrue(doc != nullptr, "document");
+	doc->client_pos(position(0, 0, 1000, 896));
+	doc->render(1000);
+
+	element* found = nullptr;
+	std::function<void(element*)> visit = [&](element* el)
+	{
+		if (found) return;
+		if (el->get_attr("id") == id)
+		{
+			found = el;
+			return;
+		}
+		for (size_t i = 0; i < el->get_children_count(); ++i) visit(el->get_child(static_cast<int>(i)));
+	};
+	visit(doc->root());
+
+	should::EqualTrue(found != nullptr, id);
+	check(*found);
+}
+
 void register_layout_tests(tests& t)
 {
 	t.register_test("Layout: repeated render is stable", []
@@ -1061,7 +1089,7 @@ void register_layout_tests(tests& t)
 	});
 	t.register_test("Layout: wikipedia comparison table", []
 	{
-		should_lay_out_fixture("wikipedia-comparison-of-web-browsers.html", 2065, 36898);
+		should_lay_out_fixture("wikipedia-comparison-of-web-browsers.html", 2065, 35735);
 	});
 	t.register_test("Layout: bbc news", []
 	{
@@ -1286,6 +1314,138 @@ void register_layout_tests(tests& t)
 			"<body><p id='a'></p><p id='b'></p><p id='c'></p></body></html>";
 		should::equal(40, should_box_of(sibling, "b").height, "adjacent sibling matches");
 		should::equal(5, should_box_of(sibling, "c").height, "next-but-one does not");
+	});
+
+	// The cascade weighs origin before specificity. The user-agent sheet's
+	// "ul ul" and "a:link" used to beat an author's plainer "ul" and "a", so
+	// nested lists lost their margins and links kept the default blue underline.
+	t.register_test("Style: author rules outrank the user-agent sheet", []
+	{
+		const auto page = [](const char* extra)
+		{
+			return std::string("<html><head><style>body{margin:0}ul{margin:20px 0;padding:0}li{display:block}") +
+				extra + "</style></head><body><ul id='outer'><li>a<ul><li>b</li></ul></li></ul></body></html>";
+		};
+		should::equal(should_box_of(page("ul ul{margin:20px 0}"), "outer").height,
+		              should_box_of(page(""), "outer").height, "nested list keeps the author margin");
+
+		should_check_element(
+			"<html><head><style>a{color:#123456;text-decoration:none}</style></head>"
+			"<body><a id='t' href='page.html'>link</a></body></html>", "t", [](element& el)
+			{
+				const auto color = el.get_color(prop_id::color, true);
+				should::equal(0x12, color.red, "author link red");
+				should::equal(0x34, color.green, "author link green");
+				should::equal(0x56, color.blue, "author link blue");
+				should::equal("none", std::string(el.get_style_property(prop_id::text_decoration, true)),
+				              "author link decoration");
+			});
+	});
+
+	// The relative keywords scale the parent's size; they used to resolve to
+	// the document default, so <small> inside 16px text was 16px.
+	t.register_test("Style: smaller and larger scale the parent font size", []
+	{
+		const auto width_of = [](const char* parent, const char* own)
+		{
+			return should_box_of(std::string("<html><body><div style='font-size:") + parent +
+			                     "'><span id='t' style='display:inline-block;font-size:" + own +
+			                     "'>MMMMMMMMMM</span></div></body></html>", "t").width;
+		};
+		should::equal(width_of("30px", "25px"), width_of("30px", "smaller"), "smaller than 30px");
+		should::equal(width_of("10px", "12px"), width_of("10px", "larger"), "larger than 10px");
+	});
+
+	// A legacy bgcolor colours its cell, and any CSS rule still wins over it.
+	t.register_test("Style: bgcolor attribute sets the background", []
+	{
+		const auto expect_background = [](const char* style, const char* bgcolor, const int red, const int green,
+		                                  const int blue)
+		{
+			should_check_element(
+				std::string("<html><head><style>") + style + "</style></head><body><table><tr><td id='t' bgcolor='" +
+				bgcolor + "'>x</td></tr></table></body></html>", "t", [&](element& el)
+				{
+					const auto* bg = el.get_background(true);
+					should::EqualTrue(bg != nullptr, "cell has a background");
+					should::equal(red, bg->m_color.red, "background red");
+					should::equal(green, bg->m_color.green, "background green");
+					should::equal(blue, bg->m_color.blue, "background blue");
+				});
+		};
+		expect_background("", "#ff6600", 0xff, 0x66, 0x00);
+		expect_background("", "f6f6ef", 0xf6, 0xf6, 0xef);
+		expect_background("#t{background-color:#000080}", "#ff6600", 0x00, 0x00, 0x80);
+	});
+
+	// In-page links land on the element a fragment names.
+	t.register_test("Layout: a fragment finds its element by id or name", []
+	{
+		silent_view view;
+		const auto doc = document::create_from_bytes(
+			view, "https://example.invalid/",
+			"<html><body style='margin:0'><div style='height:300px'></div>"
+			"<h2 id='sec' style='margin:10px 0;border-top:2px solid'>Section</h2>"
+			"<p><a name='old'>old style</a></p><div style='display:none'><p id='hidden'>x</p></div>"
+			"</body></html>", "text/html");
+		doc->client_pos(position(0, 0, 1000, 896));
+		doc->render(1000);
+		should::equal(310, doc->anchor_top("sec"), "id names the border box top");
+		should::EqualTrue(doc->anchor_top("old") > 310, "name on an anchor");
+		should::equal(-1, doc->anchor_top("hidden"), "nothing to show");
+		should::equal(-1, doc->anchor_top("missing"), "unknown fragment");
+	});
+
+	// The element sizes a bullet to a third of its font. Painting used to inset
+	// that box again, shrinking the disc of an 18px item to a 2px dot.
+	t.register_test("Paint: list bullet keeps the size layout gave it", []
+	{
+		struct recording_device final : device_context
+		{
+			std::vector<position> discs;
+
+			void fill_rect(const position&, const web_color&) override
+			{
+			}
+
+			void draw_text(int, int, std::string_view, font_handle, const web_color&) override
+			{
+			}
+
+			void draw_image(const image_ptr&, const position&) override
+			{
+			}
+
+			void draw_ellipse(const position&, const web_color&, int) override
+			{
+			}
+
+			void fill_ellipse(const position& pos, const web_color&) override { discs.push_back(pos); }
+
+			void push_clip(const position&) override
+			{
+			}
+
+			void pop_clip() override
+			{
+			}
+		};
+
+		silent_view view;
+		const auto doc = document::create_from_bytes(
+			view, "https://example.invalid/",
+			"<html><body><ul style='font-size:18px'><li>item</li></ul></body></html>", "text/html");
+		const position client(0, 0, 400, 300);
+		doc->client_pos(client);
+		doc->render(400);
+
+		recording_device device;
+		renderer r(device, client);
+		doc->draw(r, 0, 0, &client);
+
+		should::equal(1, static_cast<int>(device.discs.size()), "one bullet");
+		should::equal(6, device.discs.front().width, "bullet width");
+		should::equal(6, device.discs.front().height, "bullet height");
 	});
 }
 
@@ -1656,7 +1816,7 @@ void document::clear()
 void document::load_master_stylesheet(const std::string& text)
 {
 	auto media_list = media_query_list::create_from_string("screen");
-	m_styles.parse_stylesheet(text, empty, *this, media_list);
+	m_styles.parse_user_agent_stylesheet(text, *this, media_list);
 }
 
 static void parse_stream(html_scanner& sc, parser& par)
@@ -2455,6 +2615,38 @@ bool document::on_mouse_leave(position::vector& redraw_boxes)
 		}
 	}
 	return false;
+}
+
+int document::anchor_top(const std::string_view name) const
+{
+	if (!m_root || name.empty()) return -1;
+
+	int found = -1;
+
+	// A child's box is relative to its parent's content box, as in dump_boxes.
+	std::function<bool(const element*, int)> visit = [&](const element* el, const int parent_content_y)
+	{
+		if (el->get_display() == display_none) return false;
+
+		const int top = parent_content_y + el->top();
+
+		if (!el->is_text_node() &&
+			(el->get_attr("id") == name || (el->get_tag_name() == "a" && el->get_attr("name") == name)))
+		{
+			found = top + el->margin_top();
+			return true;
+		}
+
+		const int content_y = top + el->content_margins_top();
+
+		for (size_t i = 0; i < el->get_children_count(); ++i)
+			if (visit(el->get_child(static_cast<int>(i)), content_y)) return true;
+
+		return false;
+	};
+
+	visit(m_root.get(), 0);
+	return found;
 }
 
 bool document::on_lbutton_down(const int x, const int y, const int client_x, const int client_y,

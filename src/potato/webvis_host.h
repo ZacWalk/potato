@@ -10,6 +10,47 @@
 #include "platform.h"
 #include "webvis.h"
 
+#include <mutex>
+
+// The installed face for a CSS font family: a generic family such as
+// "monospace" becomes a Windows font; any other name is returned as it is.
+std::string windows_face(std::string_view css_family);
+
+// The %TEMP% file a download is written to. It is deleted exactly once: when
+// its last owner lets go - the completion that reads it, or that completion
+// being dropped because the UI queue has shut down - or earlier by discard(),
+// when a download is abandoned. Writes arrive on a WinHTTP thread, so they are
+// serialised with discard().
+class scratch_file
+{
+	std::mutex _mutex;
+	std::string _path;
+	pf::writable_file_handle_ptr _file;
+	bool _deleted = false;
+
+public:
+	scratch_file(std::string path, pf::writable_file_handle_ptr file);
+	~scratch_file();
+
+	scratch_file(const scratch_file&) = delete;
+	scratch_file& operator=(const scratch_file&) = delete;
+
+	// A new empty file named from the prefix; null when it cannot be written.
+	static std::shared_ptr<scratch_file> create(std::string_view prefix);
+
+	const std::string& path() const { return _path; }
+
+	void write(const uint8_t* data, size_t size);
+
+	// No more data is coming; the file stays for whoever reads it.
+	void close();
+
+	// Closes and deletes the file now. Later writes are dropped, and the
+	// destructor does not delete the name again: by then the system may have
+	// handed it to another download.
+	void discard();
+};
+
 // A decoded image. Wraps the platform bitmap so libwebvis can ask for its
 // intrinsic size without knowing what a pf::bitmap is.
 class potato_image final : public webvis::image
@@ -59,7 +100,8 @@ public:
 //
 // Resource loading downloads to a temp file on a WinHTTP pool thread and then
 // marshals the completion to the UI thread, so the callback libwebvis supplies
-// always runs where the DOM lives.
+// always runs where the DOM lives. A resource of a page opened from disk is a
+// local path, read directly but still completed on the UI thread.
 class potato_host final : public webvis::host
 {
 	class http_client;

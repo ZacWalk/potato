@@ -17,6 +17,37 @@
 - **`margin-inline`, `min-width:fit-content`, `object-fit`** unsupported.
 - **`data:` URLs unsupported** — the `failed=3` in every `--eval:` run are
   `data:image/svg+xml` images.
+- **`<center>` does not centre a table**, and HN's tables keep the centring
+  `<center>` gives their text: quirks mode's reset of `text-align` at a table is
+  missing. Found by hand-testing Hacker News (2026-10-09).
+- **`vertical-align: sub`/`super` are not applied** — `<sub>` and `<sup>` sit on
+  the baseline at the smaller size.
+- **`light-dark()` is not parsed**, so sites that colour with it fall back to the
+  predefined default.
+- **A flash of unstyled content** while an external stylesheet loads: the page
+  is painted before the sheet arrives and again after.
+
+## Browser
+
+Found by hand-testing the window (2026-10-09 and 2026-10-10); none is a crash.
+
+- **No Alt+Left / Alt+Right for history.** platform-h does not deliver Alt key
+  combinations to the reactor (its README's known gaps); once it does, bind them.
+- **The suggestions shown on focus list only the current URL.** They are
+  filtered by the whole URL the address bar holds when it takes focus; history
+  and bookmarks appear once that text is cleared or edited.
+- **Transparent images draw black where they are transparent.** platform-h's
+  `draw_context::draw_bitmap` is an opaque blit, so PNG alpha is ignored; it
+  needs an alpha-blending draw in platform-h first.
+- **After a redirect the address bar keeps the URL that was asked for**, and
+  relative links resolve against it: the async HTTP API reports no final URL.
+- **Only HTML and plain text are displayable.** Any other type — an image, a
+  PDF, `application/octet-stream` — is parsed as HTML and shows as garbage text.
+- **No progress indicator or Stop** while a page loads; the old page stays on
+  screen until the new one arrives.
+- **Form controls are not drawn** and do nothing; there is no form submission.
+- **The page and its resources use separate HTTP sessions**, so a cookie the
+  page's response sets is not sent with its stylesheets and images.
 
 ## Performance
 
@@ -38,10 +69,6 @@ Measured, do not re-guess. `PARSE_STYLES` dominates (~45ms on BBC) and has
 
 ## Test harness
 
-- **Headless is not offline.** The `document` constructor calls `m_http.open()`,
-  so `--layout:` still issues real WinHTTP requests (~22 on BBC) that can never
-  land. Leaves `%TEMP%\pot*` files behind and makes timings network-dependent;
-  dimensions stay reproducible. Add a flag to skip it.
 - **No headless external-CSS path**, so async-stylesheet behaviour cannot be
   reproduced deterministically. BBC is unaffected (all CSS is inline).
 - **`--eval:`'s window is now vestigial** — layout no longer needs one. Pointing

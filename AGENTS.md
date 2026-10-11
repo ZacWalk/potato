@@ -22,8 +22,10 @@ The repository holds two targets:
 - **Networking**: libwebvis never opens a socket. It asks for a URL through
   `webvis::host::load_resource` and is handed back either text or a decoded
   image. Potato backs that with an async WinHTTP client that downloads to a
-  temp file and marshals the completion to the UI thread with `pf::run_ui`.
-- **UI**: `main.cpp` builds the frame: `content_reactor` hosts the rendered document with scrolling, and `main_frame_reactor` owns the toolbar, address bar, menu and navigation history.
+  temp file and marshals the completion to the UI thread with `pf::run_ui`;
+  the resources of a page opened from disk are read straight from disk, still
+  completing on the UI thread.
+- **UI**: `main.cpp` builds the frame: `content_reactor` hosts the rendered document with scrolling (wheel, scrollbar, and the arrow, Page, Space, Home and End keys once the page has focus), and `main_frame_reactor` owns the toolbar, address bar, menu and navigation history. Text typed into the address bar is read as a URL, a local path or a bare host name (`example.com` opens `https://example.com`); a link to a fragment of the page on screen scrolls rather than reloads. A `text/plain` response or a local `.txt` file is shown as text, not parsed as markup.
 - **Platform layer**: the `pf::` surface (windows, drawing, fonts, files, HTTP)
   lives in the separate **platform-h** repository, shared with the other apps in
   this workspace. CMake pulls it in with `FetchContent`, building against a
@@ -210,10 +212,12 @@ basis for judging a layout change. `-v`/`--verbose` adds `view_host::diagnostic`
 and `resource_finished`; without it the headless view swallows all of them,
 because the base `view_host` methods are empty.
 
-Headless is **not** offline. `app_init` opens the HTTP session before dispatching
-to any mode, so external CSS and images still issue real WinHTTP requests whose
-results merely never land, and **timings vary with network weather even though
-dimensions do not**. Trust the dimensions; treat a single timing as noisy.
+Headless is offline. `app_init` opens the HTTP session only when it starts the
+window, so in `--layout:` and the self-test every external stylesheet or image
+request fails at once: nothing is fetched, no `%TEMP%\pot*` scratch file is left
+behind, and timings no longer depend on the network. (The live checks of
+`--test` use their own session.) A single timing is still noisy; trust the
+dimensions.
 
 ### `--test` — the regression gate
 
@@ -224,6 +228,9 @@ Exe\potato-64.exe --test-offline
 
 Runs the unit suite and writes an HTML report to `%TEMP%\potXXXX.tmp`; prints
 `Unit tests: PASS|FAIL` plus the report path. Exit `0`, or `10` on unit failure.
+The suite is libwebvis's (`webvis::run_tests`) plus the browser's own cases,
+which `register_shell_tests` in `main.cpp` adds to the same table — address-bar
+parsing, plain-text pages and the download scratch files.
 It then fetches four live URLs, so it also fails when the network is down, for
 reasons unrelated to a change. `--test-offline` stops after the unit suite; it is
 what `dd test --label potato` runs, while the full `--test` runs as

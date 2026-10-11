@@ -1814,4 +1814,9 @@ void register_style_tests(tests& t);
 
 void register_layout_tests(tests& t);
 
+// Runs every registered case, plus any the caller adds through register_more
+// (the browser registers its own), and returns the HTML report. A failed case
+// contains the substring "FAILED".
+std::string run_tests(const std::function<void(tests&)>& register_more = {});
+
 } // namespace webvis

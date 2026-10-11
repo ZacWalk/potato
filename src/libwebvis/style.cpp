@@ -1514,6 +1514,14 @@ void css_selector::add_media_to_doc(const std::shared_ptr<document>& doc) const
 	}
 }
 
+void css::parse_user_agent_stylesheet(const std::string& str, document& doc,
+                                      std::shared_ptr<media_query_list>& media)
+{
+	m_parsing_user_agent = true;
+	parse_stylesheet(str, empty, doc, media);
+	m_parsing_user_agent = false;
+}
+
 void css::parse_stylesheet(const std::string& str, const std::string& baseurl, document& doc,
                            std::shared_ptr<media_query_list>& media)
 {
@@ -1908,12 +1916,12 @@ void renderer::draw_list_marker(const list_marker& marker)
 {
 	apply_clip();
 
-	const int top_margin = marker.pos.height / 3;
-
+	// The element already sized the marker box to the bullet; insetting it
+	// again shrank a 16px font's disc to a 2px dot.
 	const int draw_x = marker.pos.x;
-	const int draw_y = marker.pos.y + top_margin;
-	const int draw_width = marker.pos.height - top_margin * 2;
-	const int draw_height = marker.pos.height - top_margin * 2;
+	const int draw_y = marker.pos.y;
+	const int draw_width = marker.pos.width;
+	const int draw_height = marker.pos.height;
 
 	switch (marker.marker_type)
 	{
