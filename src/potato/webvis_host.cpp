@@ -153,6 +153,48 @@ namespace
 		const int bm = std::min(a.bottom(), b.bottom());
 		return webvis::position(l, t, std::max(0, r - l), std::max(0, bm - t));
 	}
+
+	// The file a resource URL names when it is on this machine: what
+	// pf::resolve_url makes of a reference relative to a page opened from disk.
+	// Empty for anything that has to be fetched over the network.
+	std::string local_resource_path(const std::string& url)
+	{
+		std::string path = url;
+		if (path.size() >= 7 && _strnicmp(path.c_str(), "file://", 7) == 0) path = pf::resolve_url({}, path);
+
+		const bool drive_path = path.size() >= 3 && std::isalpha(static_cast<unsigned char>(path[0])) &&
+			path[1] == ':' && pf::file_path::is_path_sep(path[2]);
+		if (!drive_path) return {};
+
+		// A query or fragment is not part of the file name.
+		const auto cut = path.find_first_of("?#");
+		if (cut != std::string::npos) path.resize(cut);
+		return path;
+	}
+
+	webvis::resource_result decode_resource(const webvis::resource_kind kind, const std::string& file_name)
+	{
+		webvis::resource_result result;
+
+		if (kind == webvis::resource_kind::stylesheet)
+		{
+			result.text = file_contents(file_name);
+			result.ok = !result.text.empty();
+		}
+		else
+		{
+			auto bitmap = pf::load_bitmap_file(pf::file_path(file_name));
+			if (!bitmap) bitmap = create_svg_placeholder(file_contents(file_name));
+
+			if (bitmap)
+			{
+				result.image = std::make_shared<potato_image>(std::move(bitmap));
+				result.ok = true;
+			}
+		}
+
+		return result;
+	}
 }
 
 
@@ -212,11 +254,88 @@ void potato_device_context::pop_clip()
 }
 
 
+// ── fonts ────────────────────────────────────────────────────────────────────
+
+std::string windows_face(const std::string_view css_family)
+{
+	// The CSS generic families name no installed face, so GDI used to put its
+	// own default in their place and <pre> and <code> came out proportional.
+	static constexpr std::pair<std::string_view, std::string_view> generics[] = {
+		{"monospace", "Consolas"}, {"ui-monospace", "Consolas"},
+		{"sans-serif", "Arial"}, {"ui-sans-serif", "Segoe UI"}, {"system-ui", "Segoe UI"},
+		{"serif", "Times New Roman"}, {"ui-serif", "Times New Roman"},
+		{"cursive", "Comic Sans MS"}, {"fantasy", "Impact"},
+	};
+
+	auto name = css_family;
+	while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) name.remove_prefix(1);
+	while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.remove_suffix(1);
+
+	for (const auto& [generic, face] : generics)
+	{
+		if (name.size() == generic.size() && _strnicmp(name.data(), generic.data(), name.size()) == 0)
+			return std::string(face);
+	}
+
+	return std::string(css_family);
+}
+
+
+// ── scratch_file ─────────────────────────────────────────────────────────────
+
+scratch_file::scratch_file(std::string path, pf::writable_file_handle_ptr file)
+	: _path(std::move(path)), _file(std::move(file))
+{
+}
+
+scratch_file::~scratch_file()
+{
+	discard();
+}
+
+std::shared_ptr<scratch_file> scratch_file::create(const std::string_view prefix)
+{
+	auto path = pf::platform_temp_file_path(std::string(prefix).c_str());
+	if (path.empty()) return nullptr;
+
+	auto file = pf::open_file_for_write(pf::file_path(path));
+	if (!file)
+	{
+		pf::platform_delete_file(pf::file_path(path));
+		return nullptr;
+	}
+
+	return std::make_shared<scratch_file>(std::move(path), std::move(file));
+}
+
+void scratch_file::write(const uint8_t* data, const size_t size)
+{
+	std::lock_guard lk(_mutex);
+	if (_file) _file->write(data, static_cast<uint32_t>(size));
+}
+
+void scratch_file::close()
+{
+	std::lock_guard lk(_mutex);
+	_file.reset();
+}
+
+void scratch_file::discard()
+{
+	std::lock_guard lk(_mutex);
+	_file.reset();
+	if (_deleted) return;
+	_deleted = true;
+	pf::platform_delete_file(pf::file_path(_path));
+}
+
+
 // ── the async HTTP client ────────────────────────────────────────────────────
 //
 // Each request downloads to a temp file and then delivers one completion on the
 // UI thread. In-flight requests are tracked so they can all be cancelled at
-// shutdown.
+// shutdown. A cancelled request delivers no completion at all, so cancelling
+// also abandons its scratch file; it used to be left behind in %TEMP%.
 
 class potato_host::http_client
 {
@@ -230,8 +349,13 @@ class potato_host::http_client
 
 		void cancel()
 		{
-			std::lock_guard lk(mutex);
-			if (async) async->cancel();
+			std::function<void()> abandon_now;
+			{
+				std::lock_guard lk(mutex);
+				if (async) async->cancel();
+				abandon_now = abandon;
+			}
+			if (abandon_now) abandon_now();
 		}
 
 		void set_async(pf::async_http_request_ptr a)
@@ -243,6 +367,7 @@ class potato_host::http_client
 		callback_t callback;
 		std::mutex mutex;
 		pf::async_http_request_ptr async;
+		std::function<void()> abandon; // set before the request is shared
 	};
 
 	pf::async_http_session_ptr _session;
@@ -285,35 +410,36 @@ public:
 			url = "https://" + url;
 		}
 
-		const std::string temp_path = pf::platform_temp_file_path("pot");
-		auto file = pf::open_file_for_write(pf::file_path(temp_path));
-		if (!file)
-		{
-			pf::platform_delete_file(pf::file_path(temp_path));
-			return false;
-		}
-
-		auto req = std::make_shared<request>(std::move(callback));
-		{
-			std::lock_guard lk(_mutex);
-			_requests.push_back(req);
-		}
+		auto scratch = scratch_file::create("pot");
+		if (!scratch) return false;
 
 		struct ctx_t
 		{
 			std::shared_ptr<request> req;
-			pf::writable_file_handle_ptr file;
-			std::string file_path;
+			std::shared_ptr<scratch_file> scratch; // set once, before the request starts
 			http_client* parent = nullptr;
 			std::atomic<int> status_code{0};
 			std::atomic<bool> done{false};
 		};
 
+		auto req = std::make_shared<request>(std::move(callback));
 		auto ctx = std::make_shared<ctx_t>();
 		ctx->req = req;
-		ctx->file = std::move(file);
-		ctx->file_path = temp_path;
+		ctx->scratch = std::move(scratch);
 		ctx->parent = this;
+
+		// Whoever sets `done` first owns the scratch file: a completion that is
+		// already under way keeps it until it has been read, otherwise
+		// abandoning deletes it at once. Weak, or the request would own itself.
+		req->abandon = [weak_ctx = std::weak_ptr<ctx_t>(ctx)]
+		{
+			if (const auto c = weak_ctx.lock(); c && !c->done.exchange(true)) c->scratch->discard();
+		};
+
+		{
+			std::lock_guard lk(_mutex);
+			_requests.push_back(req);
+		}
 
 		pf::async_http_callbacks cb;
 		cb.on_headers = [ctx](const int status, std::string, uint64_t)
@@ -322,16 +448,15 @@ public:
 		};
 		cb.on_data = [ctx](const uint8_t* data, const size_t size)
 		{
-			if (ctx->file) ctx->file->write(data, static_cast<uint32_t>(size));
+			ctx->scratch->write(data, size);
 		};
 
 		auto finish = [ctx](const uint32_t error)
 		{
 			if (ctx->done.exchange(true)) return;
-			ctx->file.reset();
+			ctx->scratch->close();
 
 			auto cb_user = ctx->req->callback;
-			auto file_path = ctx->file_path;
 			const auto status = static_cast<uint32_t>(ctx->status_code.load());
 			auto* parent = ctx->parent;
 			auto req = ctx->req;
@@ -345,15 +470,13 @@ public:
 				std::erase(parent->_requests, req);
 			}
 
-			webvis::dispatch_to_ui([cb_user = std::move(cb_user), file_path = std::move(file_path),
-					error, status, req]()
-				{
-					if (cb_user) cb_user(file_path, error, status);
-					// The callback reads the body synchronously, so the
-					// download's scratch file has no readers left once it
-					// returns.
-					pf::platform_delete_file(pf::file_path(file_path));
-				});
+			// The callback reads the body synchronously. The task holds the
+			// scratch file until it has run, or until the UI queue drops it at
+			// shutdown, and whichever owner lets go last deletes it.
+			webvis::dispatch_to_ui([cb_user = std::move(cb_user), scratch = ctx->scratch, error, status, req]()
+			{
+				if (cb_user) cb_user(scratch->path(), error, status);
+			});
 		};
 
 		cb.on_complete = [finish]() { finish(0); };
@@ -362,11 +485,14 @@ public:
 		auto async = _session->get(url, std::move(cb));
 		if (!async)
 		{
-			ctx->file.reset();
-			pf::platform_delete_file(pf::file_path(temp_path));
+			// pf may already have reported the failure through on_error, in
+			// which case `finish` has queued the completion and the caller must
+			// not send a second one.
+			const bool completion_queued = ctx->done.exchange(true);
+			if (!completion_queued) ctx->scratch->discard();
 			std::lock_guard lk(_mutex);
 			std::erase(_requests, req);
-			return false;
+			return completion_queued;
 		}
 
 		req->set_async(std::move(async));
@@ -396,7 +522,7 @@ void potato_host::stop_network()
 webvis::font_handle potato_host::create_font(const webvis::font_desc& desc, webvis::font_metrics* metrics)
 {
 	pf::font_def def;
-	def.face = desc.face;
+	def.face = windows_face(desc.face);
 	def.size = desc.size;
 	def.weight = desc.weight;
 	def.italic = desc.italic;
@@ -431,35 +557,28 @@ int potato_host::text_width(const webvis::font_handle font, const std::string_vi
 void potato_host::load_resource(const webvis::resource_kind kind, const std::string& url,
                                 std::function<void(webvis::resource_result)> done)
 {
+	// A page opened from disk names its stylesheets and images by path, which
+	// WinHTTP cannot fetch. Read them here instead, still completing later on
+	// the UI thread as the engine requires.
+	if (auto path = local_resource_path(url); !path.empty())
+	{
+		webvis::dispatch_to_ui([kind, path = std::move(path), done = std::move(done)]
+		{
+			done(decode_resource(kind, path));
+		});
+		return;
+	}
+
 	const auto started = _http->download(
 		url, [kind, done](const std::string& file_name, const uint32_t error, const uint32_t status)
 		{
-			webvis::resource_result result;
-
 			if (error || status >= 400)
 			{
-				done(result);
+				done(webvis::resource_result{});
 				return;
 			}
 
-			if (kind == webvis::resource_kind::stylesheet)
-			{
-				result.text = file_contents(file_name);
-				result.ok = !result.text.empty();
-			}
-			else
-			{
-				auto bitmap = pf::load_bitmap_file(pf::file_path(file_name));
-				if (!bitmap) bitmap = create_svg_placeholder(file_contents(file_name));
-
-				if (bitmap)
-				{
-					result.image = std::make_shared<potato_image>(std::move(bitmap));
-					result.ok = true;
-				}
-			}
-
-			done(result);
+			done(decode_resource(kind, file_name));
 		});
 
 	// A request that never launched still owes the caller a completion, or the

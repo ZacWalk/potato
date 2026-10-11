@@ -3525,6 +3525,24 @@ void element::calc_outlines(const int parent_width)
 
 void element::parse_attributes()
 {
+	// Legacy presentational colour, still common on table layouts such as
+	// Hacker News. Like the other hints here it sits below every CSS rule.
+	if (m_type == el_tr || m_type == el_td || m_type == el_table || m_type == el_body)
+	{
+		std::string bgcolor(get_attr("bgcolor"));
+
+		if (!bgcolor.empty())
+		{
+			if ((bgcolor.size() == 3 || bgcolor.size() == 6) &&
+				std::all_of(bgcolor.begin(), bgcolor.end(), [](const char c) { return std::isxdigit(static_cast<unsigned char>(c)) != 0; }))
+			{
+				bgcolor.insert(0, "#");
+			}
+
+			m_style.add_property("background-color", bgcolor, "", false);
+		}
+	}
+
 	if (m_type == el_tr)
 	{
 		std::string str(get_attr("align"));
@@ -4100,7 +4118,15 @@ void element::init_font()
 
 		css_length sz;
 		sz.fromString(str, font_size_strings);
-		if (sz.is_predefined())
+		if (sz.is_predefined() && (sz.predef() == font_size_smaller || sz.predef() == font_size_larger))
+		{
+			// The relative keywords scale the parent's size by the 1.2 ratio
+			// between neighbouring absolute keywords, not the document default.
+			m_font_size = sz.predef() == font_size_smaller
+				              ? std::max(1, round_d(parent_sz / 1.2))
+				              : round_d(parent_sz * 1.2);
+		}
+		else if (sz.is_predefined())
 		{
 			const int idx_in_table = doc_font_size - 9;
 			if (idx_in_table >= 0 && idx_in_table <= 7)

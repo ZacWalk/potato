@@ -234,6 +234,10 @@ public:
 	bool on_lbutton_up(int x, int y, int client_x, int client_y, position::vector& redraw_boxes);
 	bool on_mouse_leave(position::vector& redraw_boxes);
 
+	// Document-space top of what a URL fragment names: the first element with
+	// that id, or an <a> with that name. -1 when nothing visible matches.
+	int anchor_top(std::string_view name) const;
+
 	element* root() { return m_root.get(); };
 	void add_fixed_box(const position& pos);
 	void add_media_list(const std::shared_ptr<media_query_list>& list);

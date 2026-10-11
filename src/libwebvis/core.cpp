@@ -728,7 +728,7 @@ static void should_pass_css_size()
 }
 
 
-std::string run_tests()
+std::string run_tests(const std::function<void(tests&)>& register_more)
 {
 	tests tests;
 
@@ -737,6 +737,7 @@ std::string run_tests()
 	register_scanner_tests(tests);
 	register_style_tests(tests);
 	register_layout_tests(tests);
+	if (register_more) register_more(tests);
 
 	std::stringstream output;
 	tests.run_tests(output);
