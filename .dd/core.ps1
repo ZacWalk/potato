@@ -1,5 +1,5 @@
 $script:DDHome = $PSScriptRoot
-$script:DDVersion = '0.2.1'
+$script:DDVersion = '0.2.2'
 
 # Authoritative runtime inventory. Copy-DDRuntime, Invoke-DD, tools/prepare.ps1,
 # tools/package.ps1 and bootstrap.ps1 all derive their file lists from these.
@@ -197,9 +197,10 @@ function Read-DDManifestModel([string]$Root, [string]$Path) {
     $ids = @()
     if ($model['targets'] -isnot [array] -or $model['targets'].Count -eq 0) { Stop-DD 'targets must be a nonempty array of hashtables.' }
     foreach ($target in $model['targets']) {
-        Assert-DDFields $target @('id', 'kind', 'cmake-target', 'debug-path', 'release-path', 'platforms', 'test-label') 'a target'
+        Assert-DDFields $target @('id', 'kind', 'cmake-target', 'debug-path', 'release-path', 'platforms', 'test-label', 'smoke') 'a target'
         Assert-DDPresent $target @('id', 'kind', 'cmake-target', 'debug-path', 'release-path') 'a target'
         if ($target.ContainsKey('test-label') -and ($target['test-label'] -isnot [string] -or -not $target['test-label'])) { Stop-DD 'test-label must be a nonempty string.' }
+        if ($target.ContainsKey('smoke') -and ($target['kind'] -ne 'gui' -or $target['smoke'] -notin @('close', 'start'))) { Stop-DD "smoke is 'close' or 'start', and only on a gui target." }
         if ($target['id'] -notmatch '^[A-Za-z][A-Za-z0-9_-]*$' -or $target['id'] -in $ids) { Stop-DD 'Target IDs must be valid and unique.' }
         $ids += $target['id']
         if ($target['kind'] -notin @('gui', 'cli', 'library') -or -not $target['cmake-target']) { Stop-DD 'Targets require kind and cmake-target.' }
@@ -647,7 +648,7 @@ function Invoke-DDCommand($Options) {
                         foreach ($gui in @($smokeTargets | Where-Object { $_['kind'] -eq 'gui' -and (Get-DDPlatform) -in @(Get-DDTargetPlatforms $_) })) {
                             if ($Options.label -or $Options.name) { continue }
                             $binary = Get-DDPath $root (Expand-DDTargetPath $gui["$config-path"] (Get-DDPlatform))
-                            $results.Add((Invoke-DDGuiSmoke $binary $root))
+                            $results.Add((Invoke-DDGuiSmoke $binary $root ($gui['smoke'] -ne 'start')))
                         }
                     }
                 }
