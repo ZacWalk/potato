@@ -9,6 +9,8 @@ Back in the 2000s, I needed to move from C++ to work on a Web project. I wanted 
 
 Here is what I came up with, probably the worst web browser in the world. I try to keep it working well enough to display Wikipedia.
 
+![Potato browser displaying its built-in start page](potato.png)
+
 ## What is in the box
 
 About 24,000 lines of C++20 with no third-party HTML or CSS library, split into a
