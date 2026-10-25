@@ -1,0 +1,33 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The vendored dd runtime locates Visual Studio, enters the MSVC
+      # environment and uses the CMake and Ninja that ship with it.
+      - name: Validate pinned dependency declarations
+        shell: pwsh
+        run: ./dd.ps1 dep install --non-interactive
+
+      - name: Check native toolchain
+        shell: pwsh
+        run: ./dd.ps1 doctor --non-interactive
+
+      - name: Build and test Debug and Release
+        shell: pwsh
+        run: ./dd.ps1 test --non-interactive

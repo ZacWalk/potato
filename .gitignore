@@ -186,3 +186,15 @@ FakesAssemblies/
 /.vs/*
 /exe/potato.iobj
 *.ipdb
+*.exe
+
+# CMake / Ninja
+/build/
+/Exe/
+CMakeUserPresets.json
+debug_trace.log
+
+# Captured tool output
+output.txt
+test_output.txt
+/.dd/state/

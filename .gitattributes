@@ -1,0 +1,5 @@
+# dd's vendored runtime, byte for byte; GitHub should not count it as this project's code
+/dd.ps1 -text linguist-vendored
+/.dd/** -text linguist-vendored
+# Saved third-party pages the offline tests load, not this project's code
+/test-files/** linguist-vendored

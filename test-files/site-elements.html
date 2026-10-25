@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Potato site elements</title>
+<style>
+  body * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #f5f5f3;
+    color: #202122;
+    font-family: Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.45;
+  }
+  a { color: #2457a7; text-decoration: none; }
+  button, input { font: inherit; }
+  .site-header {
+    background: #ffffff;
+    border-bottom: 1px solid #c8ccd1;
+    padding: 10px 18px;
+  }
+  .header-row {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin: 0 auto;
+    max-width: 1180px;
+  }
+  .brand { color: #202122; font-size: 22px; font-weight: 700; }
+  .nav { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  .nav a { color: #202122; font-size: 14px; font-weight: 700; }
+  .page {
+    margin: 0 auto;
+    max-width: 1180px;
+    padding: 24px 18px 40px;
+  }
+  .section {
+    background: #ffffff;
+    border: 1px solid #c8ccd1;
+    margin-bottom: 22px;
+    padding: 18px;
+  }
+  .section-title {
+    border-bottom: 3px solid #202122;
+    font-family: Georgia, serif;
+    font-size: 24px;
+    margin: 0 0 16px;
+    padding-bottom: 7px;
+  }
+  .source-label {
+    color: #54595d;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  /* Google: centered intrinsic-width content, rounded input and buttons. */
+  .search-demo { padding: 28px 12px; text-align: center; }
+  .search-mark { font-size: 38px; font-weight: 700; margin-bottom: 18px; }
+  .search-mark span { color: #c5221f; }
+  .search-form {
+    display: flex;
+    margin: 0 auto 14px;
+    max-width: 580px;
+  }
+  .search-input {
+    border: 1px solid #9aa0a6;
+    border-radius: 22px 0 0 22px;
+    min-width: 0;
+    padding: 10px 16px;
+    width: 100%;
+  }
+  .search-button {
+    background: #1a73e8;
+    border: 1px solid #1a73e8;
+    border-radius: 0 22px 22px 0;
+    color: #ffffff;
+    padding: 8px 18px;
+  }
+  .search-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+  .soft-button { background: #f1f3f4; border: 1px solid #dadce0; padding: 8px 13px; }
+
+  /* BBC: responsive lead story plus a wrapping card rail. */
+  .news-lead { display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 18px; }
+  .lead-media {
+    background: #d8dadd;
+    flex: 1 1 58%;
+    min-height: 220px;
+    position: relative;
+  }
+  .media-caption {
+    background: #202224;
+    bottom: 0;
+    color: #ffffff;
+    left: 0;
+    padding: 8px 10px;
+    position: absolute;
+  }
+  .lead-copy { flex: 1 1 42%; }
+  .lead-copy h3 { font-family: Georgia, serif; font-size: 28px; line-height: 1.15; margin: 0 0 10px; }
+  .lead-copy p { margin: 0 0 10px; }
+  .timestamp { color: #54595d; font-size: 13px; }
+  .card-row { display: flex; flex-wrap: wrap; gap: 14px; }
+  .news-card { border-top: 4px solid #b80000; flex: 1 1 210px; padding-top: 9px; }
+  .news-card h4 { font-family: Georgia, serif; font-size: 18px; margin: 0 0 6px; }
+
+  /* Diffractor: dense thumbnail gallery with fixed media dimensions. */
+  .gallery-toolbar { margin-bottom: 14px; }
+  .gallery-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tool { background: #ffffff; border: 1px solid #aeb4bb; padding: 6px 10px; }
+  .gallery { display: flex; flex-wrap: wrap; gap: 10px; }
+  .photo { background: #eef0f2; border: 1px solid #b8bdc3; flex: 1 1 155px; min-width: 0; padding: 7px; }
+  .photo-media { height: 112px; position: relative; }
+  .photo:nth-child(1) .photo-media { background: #6f8f72; }
+  .photo:nth-child(2) .photo-media { background: #587ea3; }
+  .photo:nth-child(3) .photo-media { background: #b38b57; }
+  .photo:nth-child(4) .photo-media { background: #8d748c; }
+  .photo:nth-child(5) .photo-media { background: #718b9b; }
+  .photo:nth-child(6) .photo-media { background: #9a6f62; }
+  .badge { background: #202122; color: #ffffff; font-size: 11px; padding: 2px 5px; position: absolute; right: 5px; top: 5px; }
+  .filename { overflow-wrap: anywhere; padding-top: 6px; }
+
+  /* Wikipedia: sidebar, article flow, infobox and wide comparison table. */
+  .wiki-layout { display: flex; flex-wrap: wrap; gap: 20px; }
+  .wiki-sidebar { flex: 0 0 170px; font-size: 14px; }
+  .wiki-sidebar ul { margin: 8px 0 18px; padding-left: 18px; }
+  .wiki-article { flex: 1 1 620px; min-width: 0; }
+  .wiki-article h2 { border-bottom: 1px solid #a2a9b1; font-family: Georgia, serif; font-weight: 400; margin: 0 0 10px; }
+  .infobox { background: #f8f9fa; border: 1px solid #a2a9b1; float: right; margin: 0 0 12px 18px; padding: 8px; width: 230px; }
+  .infobox-title { background: #eaecf0; font-weight: 700; padding: 6px; text-align: center; }
+  .infobox-media { background: #c9d6df; height: 105px; margin: 8px 0; }
+  .table-scroll { clear: both; max-width: 100%; overflow-x: auto; }
+  table { border-collapse: collapse; min-width: 650px; width: 100%; }
+  th, td { border: 1px solid #a2a9b1; padding: 7px 9px; text-align: left; }
+  th { background: #eaecf0; }
+  .yes { background: #d5f0d0; text-align: center; }
+  .partial { background: #fff0bd; text-align: center; }
+
+  .site-footer { background: #202224; color: #ffffff; padding: 18px; }
+  .footer-row { margin: 0 auto; max-width: 1180px; }
+  .footer-row span { display: block; margin-bottom: 6px; }
+
+</style>
+</head>
+<body>
+<header class="site-header" data-probe="header">
+  <div class="header-row" data-probe="header-row">
+    <div class="brand" data-probe="brand">Potato layout lab</div>
+    <nav class="nav" data-probe="navigation"><a href="#search">Search</a><a href="#news">News</a><a href="#gallery">Gallery</a><a href="#article">Article</a></nav>
+  </div>
+</header>
+<main class="page" data-probe="page">
+  <section class="section search-demo" id="search" data-probe="search-section">
+    <div class="source-label" data-probe="search-label">Google pattern</div>
+    <div class="search-mark" data-probe="search-mark">Pota<span>to</span></div>
+    <form class="search-form" data-probe="search-form"><input class="search-input" data-probe="search-input" aria-label="Search" value="layout engine test"><button class="search-button" data-probe="search-button" type="button">Search</button></form>
+    <div class="search-actions" data-probe="search-actions"><button class="soft-button" data-probe="search-action-primary" type="button">Potato Search</button><button class="soft-button" data-probe="search-action-secondary" type="button">I feel fortunate</button></div>
+  </section>
+
+  <section class="section" id="news" data-probe="news-section">
+    <div class="source-label" data-probe="news-label">BBC pattern</div>
+    <h2 class="section-title" data-probe="news-title">Top stories</h2>
+    <div class="news-lead" data-probe="news-lead">
+      <div class="lead-media" data-probe="lead-media"><span class="media-caption" data-probe="media-caption">Live coverage</span></div>
+      <div class="lead-copy" data-probe="lead-copy"><h3 data-probe="lead-headline">A compact headline wraps without pushing the page wide</h3><p data-probe="lead-summary">The lead story combines flexible media, serif display type and metadata in a constrained row.</p><span class="timestamp">2 hours ago | World</span></div>
+    </div>
+    <div class="card-row" data-probe="news-cards">
+      <article class="news-card" data-probe="news-card-1"><h4>Markets react to the latest report</h4><span class="timestamp">Business</span></article>
+      <article class="news-card" data-probe="news-card-2"><h4>City transport plan moves forward</h4><span class="timestamp">Technology</span></article>
+      <article class="news-card" data-probe="news-card-3"><h4>Weekend fixtures and results</h4><span class="timestamp">Sport</span></article>
+    </div>
+  </section>
+
+  <section class="section" id="gallery" data-probe="gallery-section">
+    <div class="source-label" data-probe="gallery-label">Diffractor pattern</div>
+    <div class="gallery-toolbar" data-probe="gallery-toolbar"><h2 class="section-title">July collection</h2><div class="gallery-tools" data-probe="gallery-tools"><button class="tool" type="button">Sort</button><button class="tool" type="button">View</button></div></div>
+    <div class="gallery" data-probe="gallery-grid">
+      <div class="photo" data-probe="photo-1"><div class="photo-media" data-probe="photo-media-1"><span class="badge">JPG</span></div><div class="filename">garden-evening.jpg</div></div>
+      <div class="photo" data-probe="photo-2"><div class="photo-media" data-probe="photo-media-2"><span class="badge">RAW</span></div><div class="filename">coast-0042.raw</div></div>
+      <div class="photo" data-probe="photo-3"><div class="photo-media" data-probe="photo-media-3"><span class="badge">JPG</span></div><div class="filename">station-arch.jpg</div></div>
+      <div class="photo" data-probe="photo-4"><div class="photo-media" data-probe="photo-media-4"><span class="badge">PNG</span></div><div class="filename">poster-final.png</div></div>
+      <div class="photo" data-probe="photo-5"><div class="photo-media" data-probe="photo-media-5"><span class="badge">JPG</span></div><div class="filename">bridge-dawn.jpg</div></div>
+      <div class="photo" data-probe="photo-6"><div class="photo-media" data-probe="photo-media-6"><span class="badge">MP4</span></div><div class="filename">street-scene.mp4</div></div>
+    </div>
+  </section>
+
+  <section class="section" id="article" data-probe="article-section">
+    <div class="source-label" data-probe="article-label">Wikipedia pattern</div>
+    <div class="wiki-layout" data-probe="wiki-layout">
+      <aside class="wiki-sidebar" data-probe="wiki-sidebar"><strong>Contents</strong><ul><li><a href="#history">History</a></li><li><a href="#features">Features</a></li><li><a href="#comparison">Comparison</a></li></ul><strong>Appearance</strong><ul><li>Text size</li><li>Page width</li></ul></aside>
+      <article class="wiki-article" data-probe="wiki-article">
+        <h2 data-probe="article-title">Web browser</h2>
+        <aside class="infobox" data-probe="infobox"><div class="infobox-title">Potato</div><div class="infobox-media" data-probe="infobox-media"></div><strong>Type</strong><br>Web browser<br><strong>Engine</strong><br>Custom</aside>
+        <p data-probe="article-intro">A <b>web browser</b> retrieves and displays pages. This sample mixes flowing prose, links, an infobox, lists and a table to exercise the layouts found on reference pages.</p>
+        <p id="history" data-probe="article-history">Early browsers established navigation conventions that remain familiar. Modern pages add responsive styles, intrinsic sizing and increasingly complex layout rules.</p>
+        <h2 id="features" data-probe="article-features-title">Features</h2>
+        <p data-probe="article-features-copy">The rendering engine must resolve the cascade, measure inline text, place floats and keep wide content within the available viewport.</p>
+        <div class="table-scroll" id="comparison" data-probe="comparison-scroll">
+          <table data-probe="comparison-table"><thead><tr><th>Feature</th><th>Potato</th><th>Browser A</th><th>Browser B</th></tr></thead><tbody><tr><td>HTML parsing</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr><tr><td>CSS Grid</td><td class="partial">Partial</td><td class="yes">Yes</td><td class="yes">Yes</td></tr><tr><td>Offline fixture</td><td class="yes">Yes</td><td class="partial">Varies</td><td class="partial">Varies</td></tr></tbody></table>
+        </div>
+      </article>
+    </div>
+  </section>
+</main>
+<footer class="site-footer" data-probe="footer"><div class="footer-row" data-probe="footer-row"><span>Potato layout lab</span><span>Search · News · Gallery · Reference</span></div></footer>
+<script>
+(() => {
+  const pixel = value => Math.round(parseFloat(value) * 100) / 100;
+  const edges = (style, prefix) => ({
+    top: pixel(style[prefix + "Top"]),
+    right: pixel(style[prefix + "Right"]),
+    bottom: pixel(style[prefix + "Bottom"]),
+    left: pixel(style[prefix + "Left"])
+  });
+
+  window.dumpLayoutDiagnostics = () => {
+    const probes = [...document.querySelectorAll("[data-probe]")].map(element => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        key: element.dataset.probe,
+        tag: element.tagName.toLowerCase(),
+        rect: {
+          x: pixel(rect.left + scrollX),
+          y: pixel(rect.top + scrollY),
+          width: pixel(rect.width),
+          height: pixel(rect.height)
+        },
+        display: style.display,
+        position: style.position,
+        boxSizing: style.boxSizing,
+        overflowX: style.overflowX,
+        overflowY: style.overflowY,
+        margin: edges(style, "margin"),
+        padding: edges(style, "padding"),
+        border: edges(style, "border"),
+        fontFamily: style.fontFamily,
+        fontSize: pixel(style.fontSize),
+        lineHeight: style.lineHeight === "normal" ? "normal" : pixel(style.lineHeight)
+      };
+    });
+
+    return JSON.stringify({
+      source: "browser",
+      viewport: {
+        width: innerWidth,
+        height: innerHeight,
+        devicePixelRatio,
+        scrollX,
+        scrollY
+      },
+      document: {
+        width: document.documentElement.scrollWidth,
+        height: document.documentElement.scrollHeight
+      },
+      probes
+    }, null, 2);
+  };
+
+  addEventListener("load", () => {
+    const button = document.createElement("button");
+    button.textContent = "Copy diagnostics";
+    button.dataset.diagnosticControl = "true";
+    Object.assign(button.style, {
+      position: "fixed",
+      top: "10px",
+      right: "10px",
+      zIndex: "2147483647",
+      padding: "8px 12px",
+      border: "1px solid #70757a",
+      background: "#ffffff",
+      color: "#202124",
+      font: "13px Arial, sans-serif",
+      cursor: "pointer"
+    });
+    button.addEventListener("click", async () => {
+      const diagnostics = window.dumpLayoutDiagnostics();
+      console.log(diagnostics);
+      await navigator.clipboard.writeText(diagnostics);
+      button.textContent = "Copied";
+      setTimeout(() => { button.textContent = "Copy diagnostics"; }, 1200);
+    });
+    document.body.appendChild(button);
+    console.log("Layout diagnostics ready. Click Copy diagnostics or run dumpLayoutDiagnostics().");
+  });
+})();
+</script>
+</body>
+</html>

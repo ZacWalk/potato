@@ -1,0 +1,2071 @@
+// style.cpp - CSS shorthand parsing, media query evaluation, selector matching,
+// at-rule handling, stylesheet loading, and rendering of text, borders,
+// backgrounds, and images through webvis::device_context.
+
+#include "pch.h"
+#include "document.h"
+
+namespace webvis
+{
+
+auto prop_id_strings =
+	"-potato-border-spacing-x;-potato-border-spacing-y;align-items;align-self;"
+	"background-attachment;background-clip;background-color;background-image;"
+	"background-image-baseurl;background-origin;background-position;background-repeat;"
+	"background-size;border-bottom-color;border-bottom-left-radius-x;border-bottom-left-radius-y;"
+	"border-bottom-right-radius-x;border-bottom-right-radius-y;border-bottom-style;border-bottom-width;"
+	"border-collapse;border-left-color;border-left-style;border-left-width;"
+	"border-radius-x;border-radius-y;border-right-color;border-right-style;"
+	"border-right-width;border-spacing;border-top-color;border-top-left-radius-x;"
+	"border-top-left-radius-y;border-top-right-radius-x;border-top-right-radius-y;border-top-style;"
+	"border-top-width;border-width;bottom;box-sizing;"
+	"clear;color;content;cursor;"
+	"display;flex-basis;flex-direction;flex-grow;"
+	"flex-shrink;flex-wrap;float;font-family;"
+	"font-size;font-style;font-variant;font-weight;"
+	"gap;height;justify-content;left;"
+	"line-height;list-style-image;list-style-image-baseurl;list-style-position;"
+	"list-style-type;margin-bottom;margin-left;margin-right;"
+	"margin-top;max-height;max-width;min-height;"
+	"min-width;overflow;padding-bottom;padding-left;"
+	"padding-right;padding-top;position;right;"
+	"text-align;text-decoration;text-indent;text-transform;"
+	"top;vertical-align;visibility;white-space;"
+	"width;z-index";
+
+prop_id prop_from_name(const std::string_view name)
+{
+	const auto i = value_index(name, prop_id_strings);
+	return i < 0 ? prop_id::unknown : static_cast<prop_id>(i);
+}
+
+style::entry* style::find(const prop_id id)
+{
+	const auto it = std::lower_bound(m_props.begin(), m_props.end(), id,
+	                                 [](const entry& e, const prop_id v) { return e.id < v; });
+	return it != m_props.end() && it->id == id ? &*it : nullptr;
+}
+
+const style::entry* style::find(const prop_id id) const
+{
+	return const_cast<style*>(this)->find(id);
+}
+
+std::string_view style::get_custom_property(const std::string_view name) const
+{
+	for (const auto& [key, value] : m_custom)
+	{
+		if (is_equal(key, name)) return value;
+	}
+
+	return {};
+}
+
+static void should_map_every_property_id()
+{
+	const auto names = split_string(prop_id_strings, ';');
+	should::equal(static_cast<int>(prop_id::count), static_cast<int>(names.size()), "prop_id table size");
+
+	for (size_t i = 0; i < names.size(); ++i)
+	{
+		should::equal(static_cast<int>(i), static_cast<int>(prop_from_name(names[i])), names[i].c_str());
+	}
+
+	should::equal(static_cast<int>(prop_id::unknown), static_cast<int>(prop_from_name("box-shadow")), "unknown");
+}
+
+void register_style_tests(tests& t)
+{
+	t.register_test("Style: property id table", should_map_every_property_id);
+}
+
+void style::parse(const std::string& txt, const std::string& baseurl)
+{
+	const auto declarations = split_string(txt, ';');
+
+	for (const auto& decl : declarations)
+	{
+		parse_property(decl, baseurl);
+	}
+}
+
+void style::parse_property(const std::string& txt, const std::string& baseurl)
+{
+	const auto pos = txt.find_first_of(':');
+
+	if (pos != std::string::npos)
+	{
+		const auto name = txt.substr(0, pos);
+		auto val = txt.substr(pos + 1);
+
+		trim(val);
+
+		parse_property(trim_lower(name), val, baseurl);
+	}
+}
+
+void style::parse_property(const std::string& name, const std::string& val, const std::string& baseurl)
+{
+	if (!name.empty() && !val.empty())
+	{
+		const auto pos = val.find_first_of('!');
+
+		if (pos == std::string::npos)
+		{
+			add_property(name, val, baseurl, false);
+		}
+		else
+		{
+			auto left = val.substr(0, pos);
+			const auto right = val.substr(pos + 1);
+
+			trim(left);
+
+			add_property(name, left, baseurl, is_equal(right, "important"));
+		}
+	}
+}
+
+void style::combine(const style& src)
+{
+	for (const auto& e : src.m_props)
+	{
+		add_parsed_property(e.id, e.value, e.important);
+	}
+
+	for (const auto& [key, value] : src.m_custom)
+	{
+		if (const auto it = std::ranges::find_if(m_custom, [&](const auto& c) { return is_equal(c.first, key); });
+			it != m_custom.end())
+		{
+			it->second = value;
+		}
+		else
+		{
+			m_custom.emplace_back(key, value);
+		}
+	}
+}
+
+void style::add_property(const std::string& name, const std::string& val, const std::string& baseurl,
+                         const bool important)
+{
+	if (name.empty() || val.empty())
+	{
+		return;
+	}
+
+	// Add baseurl for background image 
+	if (name == "background-image")
+	{
+		add_parsed_property(name, val, important);
+
+		if (!baseurl.empty())
+		{
+			add_parsed_property("background-image-baseurl", baseurl, important);
+		}
+	}
+	// Parse border spacing properties 
+	else if (name == "border-spacing")
+	{
+		const auto tokens = split_string(val);
+
+		if (tokens.size() == 1)
+		{
+			add_property("-potato-border-spacing-x", tokens[0], baseurl, important);
+			add_property("-potato-border-spacing-y", tokens[0], baseurl, important);
+		}
+		else if (tokens.size() == 2)
+		{
+			add_property("-potato-border-spacing-x", tokens[0], baseurl, important);
+			add_property("-potato-border-spacing-y", tokens[1], baseurl, important);
+		}
+	}
+	// Parse borders shorthand properties 
+	else if (name == "border")
+	{
+		const auto tokens = split_string(val, " ");
+
+		for (const auto& tok : tokens)
+		{
+			const auto idx = value_index(tok, border_style_strings, -1);
+
+			if (idx >= 0)
+			{
+				add_property("border-left-style", tok, baseurl, important);
+				add_property("border-right-style", tok, baseurl, important);
+				add_property("border-top-style", tok, baseurl, important);
+				add_property("border-bottom-style", tok, baseurl, important);
+			}
+			else
+			{
+				if (web_color::is_color(tok))
+				{
+					add_property("border-left-color", tok, baseurl, important);
+					add_property("border-right-color", tok, baseurl, important);
+					add_property("border-top-color", tok, baseurl, important);
+					add_property("border-bottom-color", tok, baseurl, important);
+				}
+				else
+				{
+					add_property("border-left-width", tok, baseurl, important);
+					add_property("border-right-width", tok, baseurl, important);
+					add_property("border-top-width", tok, baseurl, important);
+					add_property("border-bottom-width", tok, baseurl, important);
+				}
+			}
+		}
+	}
+	// Parse border radius shorthand properties 
+	else if (name == "border-bottom-left-radius" ||
+		name == "border-bottom-right-radius" ||
+		name == "border-top-right-radius" ||
+		name == "border-top-left-radius")
+	{
+		const auto tokens = split_string(val);
+		add_property(name + "-x", tokens[0], baseurl, important);
+		add_property(name + "-y", tokens.size() >= 2 ? tokens[1] : tokens[0], baseurl, important);
+	}
+	// Parse border-radius shorthand properties 
+	else if (name == "border-radius")
+	{
+		const auto tokens = split_string(val, '/');
+		if (tokens.size() == 1)
+		{
+			add_property("border-radius-x", tokens[0], baseurl, important);
+			add_property("border-radius-y", tokens[0], baseurl, important);
+		}
+		else if (tokens.size() >= 2)
+		{
+			add_property("border-radius-x", tokens[0], baseurl, important);
+			add_property("border-radius-y", tokens[1], baseurl, important);
+		}
+	}
+	else if (name == "border-radius-x" || name == "border-radius-y")
+	{
+		const auto tokens = split_string(val);
+		const auto axis = name.substr(name.size() - 1); // "x" or "y"
+		const char* corners[] = {
+			"border-top-left-radius-", "border-top-right-radius-", "border-bottom-right-radius-",
+			"border-bottom-left-radius-"
+		};
+		// CSS box model: 1 value = all, 2 = top-left/bottom-right + top-right/bottom-left, 3 = top-left + top-right/bottom-left + bottom-right, 4 = each
+		size_t idx[] = {0, 0, 0, 0};
+		if (tokens.size() == 1) { idx[0] = idx[1] = idx[2] = idx[3] = 0; }
+		else if (tokens.size() == 2)
+		{
+			idx[0] = 0;
+			idx[1] = 1;
+			idx[2] = 0;
+			idx[3] = 1;
+		}
+		else if (tokens.size() == 3)
+		{
+			idx[0] = 0;
+			idx[1] = 1;
+			idx[2] = 2;
+			idx[3] = 1;
+		}
+		else if (tokens.size() >= 4)
+		{
+			idx[0] = 0;
+			idx[1] = 1;
+			idx[2] = 2;
+			idx[3] = 3;
+		}
+		for (int i = 0; i < 4; i++)
+		{
+			add_property(std::string(corners[i]) + axis, tokens[idx[i]], baseurl, important);
+		}
+	}
+	// Parse list-style shorthand properties 
+	else if (name == "list-style")
+	{
+		add_parsed_property("list-style-type", "disc", important);
+		add_parsed_property("list-style-position", "outside", important);
+		add_parsed_property("list-style-image", empty, important);
+		add_parsed_property("list-style-image-baseurl", empty, important);
+
+		const auto tokens = split_string(val, " ");
+
+		for (const auto& tok : tokens)
+		{
+			int idx = value_index(tok, list_style_type_strings, -1);
+			if (idx >= 0)
+			{
+				add_parsed_property("list-style-type", tok, important);
+			}
+			else
+			{
+				idx = value_index(tok, list_style_position_strings, -1);
+				if (idx >= 0)
+				{
+					add_parsed_property("list-style-position", tok, important);
+				}
+				else if (starts(tok, "url"))
+				{
+					add_parsed_property("list-style-image", tok, important);
+					if (!baseurl.empty())
+					{
+						add_parsed_property("list-style-image-baseurl", baseurl, important);
+					}
+				}
+			}
+		}
+	}
+	// Add baseurl for background image 
+	else if (name == "list-style-image")
+	{
+		add_parsed_property(name, val, important);
+		if (!baseurl.empty())
+		{
+			add_parsed_property("list-style-image-baseurl", baseurl, important);
+		}
+	}
+	// Parse background shorthand properties 
+	else if (name == "background")
+	{
+		parse_short_background(val, baseurl, important);
+	}
+	// Parse margin and padding shorthand properties 
+	else if (name == "margin" || name == "padding")
+	{
+		const auto tokens = split_string(val);
+		if (tokens.size() >= 4)
+		{
+			add_parsed_property(name + "-top", tokens[0], important);
+			add_parsed_property(name + "-right", tokens[1], important);
+			add_parsed_property(name + "-bottom", tokens[2], important);
+			add_parsed_property(name + "-left", tokens[3], important);
+		}
+		else if (tokens.size() == 3)
+		{
+			add_parsed_property(name + "-top", tokens[0], important);
+			add_parsed_property(name + "-right", tokens[1], important);
+			add_parsed_property(name + "-left", tokens[1], important);
+			add_parsed_property(name + "-bottom", tokens[2], important);
+		}
+		else if (tokens.size() == 2)
+		{
+			add_parsed_property(name + "-top", tokens[0], important);
+			add_parsed_property(name + "-bottom", tokens[0], important);
+			add_parsed_property(name + "-right", tokens[1], important);
+			add_parsed_property(name + "-left", tokens[1], important);
+		}
+		else if (tokens.size() == 1)
+		{
+			add_parsed_property(name + "-top", tokens[0], important);
+			add_parsed_property(name + "-bottom", tokens[0], important);
+			add_parsed_property(name + "-right", tokens[0], important);
+			add_parsed_property(name + "-left", tokens[0], important);
+		}
+	}
+	// Parse border-* shorthand properties 
+	else if (name == "border-left" ||
+		name == "border-right" ||
+		name == "border-top" ||
+		name == "border-bottom")
+	{
+		parse_short_border(name, val, important);
+	}
+	// Parse border-width/style/color shorthand properties 
+	else if (name == "border-width")
+	{
+		parse_border_style("width", val, important);
+	}
+	else if (name == "border-style")
+	{
+		parse_border_style("style", val, important);
+	}
+	else if (name == "border-color")
+	{
+		parse_border_style("color", val, important);
+	}
+	// Parse font shorthand properties 
+	else if (name == "font")
+	{
+		parse_short_font(val, important);
+	}
+	// Handle text-decoration as shorthand
+	else if (name == "text-decoration")
+	{
+		add_parsed_property("text-decoration", val, important);
+	}
+	// Handle overflow shorthand (overflow-x and overflow-y)
+	else if (name == "overflow")
+	{
+		const auto tokens = split_string(val);
+		if (tokens.size() == 1)
+		{
+			add_parsed_property(name, tokens[0], important);
+		}
+		else if (tokens.size() >= 2)
+		{
+			add_parsed_property(name, tokens[0], important);
+		}
+	}
+	// Flex container properties
+	else if (name == "flex-direction" || name == "flex-wrap" ||
+		name == "align-items" || name == "align-self" || name == "justify-content")
+	{
+		add_parsed_property(name, val, important);
+	}
+	// Flex item properties
+	else if (name == "flex-grow" || name == "flex-shrink" || name == "flex-basis")
+	{
+		add_parsed_property(name, val, important);
+	}
+	// Flex shorthand
+	else if (name == "flex")
+	{
+		const auto tokens = split_string(val);
+		if (val == "none")
+		{
+			add_parsed_property("flex-grow", "0", important);
+			add_parsed_property("flex-shrink", "0", important);
+			add_parsed_property("flex-basis", "auto", important);
+		}
+		else if (val == "auto")
+		{
+			add_parsed_property("flex-grow", "1", important);
+			add_parsed_property("flex-shrink", "1", important);
+			add_parsed_property("flex-basis", "auto", important);
+		}
+		else if (tokens.size() == 1)
+		{
+			add_parsed_property("flex-grow", tokens[0], important);
+			add_parsed_property("flex-shrink", "1", important);
+			add_parsed_property("flex-basis", "0", important);
+		}
+		else if (tokens.size() == 2)
+		{
+			add_parsed_property("flex-grow", tokens[0], important);
+			add_parsed_property("flex-shrink", tokens[1], important);
+			add_parsed_property("flex-basis", "0", important);
+		}
+		else if (tokens.size() >= 3)
+		{
+			add_parsed_property("flex-grow", tokens[0], important);
+			add_parsed_property("flex-shrink", tokens[1], important);
+			add_parsed_property("flex-basis", tokens[2], important);
+		}
+	}
+	// Flex-flow shorthand
+	else if (name == "flex-flow")
+	{
+		const auto tokens = split_string(val);
+		for (const auto& tok : tokens)
+		{
+			if (value_index(tok, flex_direction_strings, -1) >= 0)
+				add_parsed_property("flex-direction", tok, important);
+			else if (value_index(tok, flex_wrap_strings, -1) >= 0)
+				add_parsed_property("flex-wrap", tok, important);
+		}
+	}
+	// Gap properties
+	else if (name == "gap" || name == "row-gap" || name == "column-gap")
+	{
+		add_parsed_property(name, val, important);
+	}
+	// Silently ignore grid properties we don't support yet
+	else if (name == "grid-template-columns" || name == "grid-template-rows" ||
+		name == "grid-column" || name == "grid-row" || name == "grid-area" ||
+		name == "grid-template-areas" || name == "grid-auto-columns" || name == "grid-auto-rows" ||
+		name == "grid-auto-flow" || name == "grid-template")
+	{
+		// Silently ignore grid properties
+	}
+	else
+	{
+		add_parsed_property(name, val, important);
+	}
+}
+
+void style::parse_short_border(const std::string& key, const std::string& val, const bool important)
+{
+	const auto tokens = split_string(val, " ");
+
+	if (tokens.size() >= 3)
+	{
+		add_parsed_property(key + "-width", tokens[0], important);
+		add_parsed_property(key + "-style", tokens[1], important);
+		add_parsed_property(key + "-color", tokens[2], important);
+	}
+	else if (tokens.size() == 2)
+	{
+		if (isdigit(tokens[0][0]) || value_index(val, border_width_strings) >= 0)
+		{
+			add_parsed_property(key + "-width", tokens[0], important);
+			add_parsed_property(key + "-style", tokens[1], important);
+		}
+		else
+		{
+			add_parsed_property(key + "-style", tokens[0], important);
+			add_parsed_property(key + "-color", tokens[1], important);
+		}
+	}
+}
+
+void style::parse_border_style(const char* style, const std::string& val, const bool important)
+{
+	static const std::string key("border");
+
+	const auto tokens = split_string(val);
+
+	if (tokens.size() >= 4)
+	{
+		add_parsed_property(key + "-top-" + style, tokens[0], important);
+		add_parsed_property(key + "-right-" + style, tokens[1], important);
+		add_parsed_property(key + "-bottom-" + style, tokens[2], important);
+		add_parsed_property(key + "-left-" + style, tokens[3], important);
+	}
+	else if (tokens.size() == 3)
+	{
+		add_parsed_property(key + "-top-" + style, tokens[0], important);
+		add_parsed_property(key + "-right-" + style, tokens[1], important);
+		add_parsed_property(key + "-left-" + style, tokens[1], important);
+		add_parsed_property(key + "-bottom-" + style, tokens[2], important);
+	}
+	else if (tokens.size() == 2)
+	{
+		add_parsed_property(key + "-top-" + style, tokens[0], important);
+		add_parsed_property(key + "-bottom-" + style, tokens[0], important);
+		add_parsed_property(key + "-right-" + style, tokens[1], important);
+		add_parsed_property(key + "-left-" + style, tokens[1], important);
+	}
+	else if (tokens.size() == 1)
+	{
+		add_parsed_property(key + "-top-" + style, tokens[0], important);
+		add_parsed_property(key + "-bottom-" + style, tokens[0], important);
+		add_parsed_property(key + "-right-" + style, tokens[0], important);
+		add_parsed_property(key + "-left-" + style, tokens[0], important);
+	}
+}
+
+void style::parse_short_background(const std::string& val, const std::string& baseurl, const bool important)
+{
+	add_parsed_property("background-color", "transparent", important);
+	add_parsed_property("background-image", empty, important);
+	add_parsed_property("background-image-baseurl", empty, important);
+	add_parsed_property("background-repeat", "repeat", important);
+	add_parsed_property("background-origin", "padding-box", important);
+	add_parsed_property("background-clip", "border-box", important);
+	add_parsed_property("background-attachment", "scroll", important);
+
+	if (val == "none")
+	{
+		return;
+	}
+
+	const auto tokens = split_string(val, " ");
+	auto origin_found = false;
+	auto clip_found = false;
+	std::string last_box;
+
+	for (const auto& tok : tokens)
+	{
+		if (web_color::is_color(tok))
+		{
+			add_parsed_property("background-color", tok, important);
+		}
+		else if (tok.substr(0, 3) == "url")
+		{
+			add_parsed_property("background-image", tok, important);
+			if (!baseurl.empty())
+			{
+				add_parsed_property("background-image-baseurl", baseurl, important);
+			}
+		}
+		else if (value_in_list(tok, background_repeat_strings))
+		{
+			add_parsed_property("background-repeat", tok, important);
+		}
+		else if (value_in_list(tok, background_attachment_strings))
+		{
+			add_parsed_property("background-attachment", tok, important);
+		}
+		else if (value_in_list(tok, background_box_strings))
+		{
+			if (!origin_found)
+			{
+				add_parsed_property("background-origin", tok, important);
+				origin_found = true;
+				last_box = tok;
+			}
+			else
+			{
+				add_parsed_property("background-clip", tok, important);
+				clip_found = true;
+			}
+		}
+		else if (value_in_list(tok, "left;right;top;bottom;center") ||
+			isdigit(tok[0]) ||
+			tok[0] == '-' ||
+			tok[0] == '.' ||
+			tok[0] == '+')
+		{
+			if (auto* e = find(prop_id::background_position))
+			{
+				e->value += " ";
+				e->value += tok;
+			}
+			else
+			{
+				add_parsed_property("background-position", tok, important);
+			}
+		}
+	}
+
+	// Per CSS spec: if only one <box> value is given in the background shorthand,
+	// it applies to both background-origin and background-clip.
+	if (origin_found && !clip_found)
+	{
+		add_parsed_property("background-clip", last_box, important);
+	}
+}
+
+void style::parse_short_font(const std::string& val, const bool important)
+{
+	if (val == "inherit" || val == "initial" || val == "unset")
+	{
+		add_parsed_property("font-style", val, important);
+		add_parsed_property("font-variant", val, important);
+		add_parsed_property("font-weight", val, important);
+		add_parsed_property("font-size", val, important);
+		add_parsed_property("line-height", val, important);
+		add_parsed_property("font-family", val, important);
+		return;
+	}
+
+	add_parsed_property("font-style", "normal", important);
+	add_parsed_property("font-variant", "normal", important);
+	add_parsed_property("font-weight", "normal", important);
+	add_parsed_property("font-size", "medium", important);
+	add_parsed_property("line-height", "normal", important);
+
+	const auto tokens = split_string(val, " ", "\"");
+
+	int idx = 0;
+	bool is_family = false;
+	std::string font_family;
+
+	for (const auto& tok : tokens)
+	{
+		idx = value_index(tok, font_style_strings);
+
+		if (!is_family)
+		{
+			if (idx >= 0)
+			{
+				if (idx == 0)
+				{
+					add_parsed_property("font-weight", tok, important);
+					add_parsed_property("font-variant", tok, important);
+					add_parsed_property("font-style", tok, important);
+				}
+				else
+				{
+					add_parsed_property("font-style", tok, important);
+				}
+			}
+			else
+			{
+				if (value_in_list(tok, font_weight_strings))
+				{
+					add_parsed_property("font-weight", tok, important);
+				}
+				else
+				{
+					if (value_in_list(tok, font_variant_strings))
+					{
+						add_parsed_property("font-variant", tok, important);
+					}
+					else if (isdigit(tok[0]))
+					{
+						auto szlh = split_string(tok, '/');
+
+						if (szlh.size() == 1)
+						{
+							add_parsed_property("font-size", szlh[0], important);
+						}
+						else if (szlh.size() >= 2)
+						{
+							add_parsed_property("font-size", szlh[0], important);
+							add_parsed_property("line-height", szlh[1], important);
+						}
+					}
+					else
+					{
+						is_family = true;
+						font_family += tok;
+					}
+				}
+			}
+		}
+		else
+		{
+			font_family += tok;
+		}
+	}
+
+	add_parsed_property("font-family", font_family, important);
+}
+
+void style::add_parsed_property(const std::string& name, const std::string& val_in, const bool important)
+{
+	std::string_view val = val_in;
+
+	// unquot 
+	if (val.size() > 1 && val.front() == val.back() && val.front() == '"')
+	{
+		val.remove_prefix(1);
+		val.remove_suffix(1);
+	}
+
+	if (name.starts_with("--"))
+	{
+		if (const auto it = std::ranges::find_if(m_custom, [&](const auto& c) { return is_equal(c.first, name); });
+			it != m_custom.end())
+		{
+			it->second = val;
+		}
+		else
+		{
+			m_custom.emplace_back(name, val);
+		}
+		return;
+	}
+
+	add_parsed_property(prop_from_name(name), val, important);
+}
+
+void style::add_parsed_property(const prop_id id, const std::string_view val, const bool important)
+{
+	if (id == prop_id::unknown)
+	{
+		return;
+	}
+
+	const auto it = std::lower_bound(m_props.begin(), m_props.end(), id,
+	                                 [](const entry& e, const prop_id v) { return e.id < v; });
+
+	if (it != m_props.end() && it->id == id)
+	{
+		if (!it->important || important)
+		{
+			it->value = val;
+			it->important = important;
+		}
+		return;
+	}
+
+	m_props.insert(it, entry{id, important, std::string(val)});
+}
+
+void style::remove_property(const std::string& name, const bool important)
+{
+	const auto id = prop_from_name(name);
+	const auto it = std::lower_bound(m_props.begin(), m_props.end(), id,
+	                                 [](const entry& e, const prop_id v) { return e.id < v; });
+
+	if (it != m_props.end() && it->id == id && (!it->important || important))
+	{
+		m_props.erase(it);
+	}
+}
+
+
+std::shared_ptr<media_query> media_query::create_from_string(const std::string& str)
+{
+	auto query = std::make_shared<media_query>();
+	const auto tokens = split_string(str, " \t\r\n");
+
+	for (auto tok : tokens)
+	{
+		if (tok == "not")
+		{
+			query->m_not = true;
+		}
+		else if (tok.at(0) == '(')
+		{
+			tok.erase(0, 1);
+
+			if (tok.at(tok.length() - 1) == ')')
+			{
+				tok.erase(tok.length() - 1, 1);
+			}
+
+			media_query_expression expr;
+			auto expr_tokens = split_string(tok, ':');
+
+			if (!expr_tokens.empty())
+			{
+				trim(expr_tokens[0]);
+				expr.feature = static_cast<media_feature>(value_index(expr_tokens[0], media_feature_strings,
+				                                                      media_feature_none));
+				if (expr.feature != media_feature_none)
+				{
+					if (expr_tokens.size() == 1)
+					{
+						expr.check_as_bool = true;
+					}
+					else
+					{
+						trim(expr_tokens[1]);
+						expr.check_as_bool = false;
+						if (expr.feature == media_feature_orientation)
+						{
+							expr.val = value_index(expr_tokens[1], media_orientation_strings,
+							                       media_orientation_landscape);
+						}
+						else
+						{
+							const auto slash_pos = expr_tokens[1].find_first_of('/');
+
+							if (slash_pos != std::string::npos)
+							{
+								std::string val1 = expr_tokens[1].substr(0, slash_pos);
+								std::string val2 = expr_tokens[1].substr(slash_pos + 1);
+								trim(val1);
+								trim(val2);
+								expr.val = safe_stoi(val1);
+								expr.val2 = safe_stoi(val2);
+							}
+							else
+							{
+								css_length length;
+								length.fromString(expr_tokens[1]);
+								if (length.units() == css_units_dpcm)
+								{
+									// 1 dpcm = 2.54 dpi
+									expr.val = static_cast<int>(length.val() * 2.54);
+								}
+								else if (length.units() == css_units_dpi)
+								{
+									expr.val = static_cast<int>(length.val());
+								}
+								else
+								{
+									document::cvt_units(length, document::get_default_font_size());
+									expr.val = static_cast<int>(length.val());
+								}
+							}
+						}
+					}
+					query->m_expressions.push_back(expr);
+				}
+				else
+				{
+					query->m_valid = false;
+				}
+			}
+		}
+		else if (tok == "and" || tok == "only")
+		{
+		}
+		else
+		{
+			const auto media_type_index = value_index(tok, media_type_strings, -1);
+			if (media_type_index < 0)
+			{
+				query->m_valid = false;
+			}
+			else
+			{
+				query->m_media_type = static_cast<media_type>(media_type_index);
+			}
+		}
+	}
+
+	return query;
+}
+
+bool media_query::check(const media_features& features) const
+{
+	if (!m_valid)
+	{
+		return false;
+	}
+
+	bool res = false;
+	if (m_media_type == media_type_all || m_media_type == features.type)
+	{
+		res = true;
+		for (auto expr = m_expressions.begin(); expr != m_expressions.end() && res; ++expr)
+		{
+			if (!expr->check(features))
+			{
+				res = false;
+			}
+		}
+	}
+
+	if (m_not)
+	{
+		res = !res;
+	}
+
+	return res;
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+std::shared_ptr<media_query_list> media_query_list::create_from_string(const std::string& str)
+{
+	auto list = std::make_shared<media_query_list>();
+	const auto tokens = split_string(str, ',');
+
+	for (auto tok : tokens)
+	{
+		auto query = media_query::create_from_string(trim_lower(tok));
+
+		if (query)
+		{
+			list->m_queries.push_back(query);
+		}
+	}
+	if (list->m_queries.empty())
+	{
+		list = nullptr;
+	}
+
+	return list;
+}
+
+bool media_query_list::apply_media_features(const media_features& features)
+{
+	bool apply = false;
+
+	for (const auto& q : m_queries)
+	{
+		if (q->check(features))
+		{
+			apply = true;
+		}
+	}
+
+	const bool ret = apply != m_is_used;
+	m_is_used = apply;
+	return ret;
+}
+
+bool media_query_expression::check(const media_features& features) const
+{
+	switch (feature)
+	{
+	case media_feature_width:
+		{
+			if (check_as_bool)
+			{
+				return features.width != 0;
+			}
+			if (features.width == val)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_min_width:
+		if (features.width >= val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_max_width:
+		if (features.width <= val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_height:
+		{
+			if (check_as_bool)
+			{
+				return features.height != 0;
+			}
+			if (features.height == val)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_min_height:
+		if (features.height >= val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_max_height:
+		if (features.height <= val)
+		{
+			return true;
+		}
+		break;
+
+	case media_feature_device_width:
+		{
+			if (check_as_bool)
+			{
+				return features.device_width != 0;
+			}
+			if (features.device_width == val)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_min_device_width:
+		if (features.device_width >= val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_max_device_width:
+		if (features.device_width <= val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_device_height:
+		{
+			if (check_as_bool)
+			{
+				return features.device_height != 0;
+			}
+			if (features.device_height == val)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_min_device_height:
+		if (features.device_height >= val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_max_device_height:
+		if (features.device_height <= val)
+		{
+			return true;
+		}
+		break;
+
+	case media_feature_orientation:
+		if (features.height >= features.width)
+		{
+			if (val == media_orientation_portrait)
+			{
+				return true;
+			}
+		}
+		else
+		{
+			if (val == media_orientation_landscape)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_aspect_ratio:
+		if (features.height && val2)
+		{
+			const int ratio_this = round_d(static_cast<double>(val) / static_cast<double>(val2) * 100);
+			const int ratio_feat = round_d(
+				static_cast<double>(features.width) / static_cast<double>(features.height) * 100.0);
+			if (ratio_this == ratio_feat)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_min_aspect_ratio:
+		if (features.height && val2)
+		{
+			const int ratio_this = round_d(static_cast<double>(val) / static_cast<double>(val2) * 100);
+			const int ratio_feat = round_d(
+				static_cast<double>(features.width) / static_cast<double>(features.height) * 100.0);
+			if (ratio_feat >= ratio_this)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_max_aspect_ratio:
+		if (features.height && val2)
+		{
+			const int ratio_this = round_d(static_cast<double>(val) / static_cast<double>(val2) * 100);
+			const int ratio_feat = round_d(
+				static_cast<double>(features.width) / static_cast<double>(features.height) * 100.0);
+			if (ratio_feat <= ratio_this)
+			{
+				return true;
+			}
+		}
+		break;
+
+	case media_feature_device_aspect_ratio:
+		if (features.device_height && val2)
+		{
+			const int ratio_this = round_d(static_cast<double>(val) / static_cast<double>(val2) * 100);
+			const int ratio_feat = round_d(
+				static_cast<double>(features.device_width) / static_cast<double>(features.device_height) * 100.0);
+			if (ratio_feat == ratio_this)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_min_device_aspect_ratio:
+		if (features.device_height && val2)
+		{
+			const int ratio_this = round_d(static_cast<double>(val) / static_cast<double>(val2) * 100);
+			const int ratio_feat = round_d(
+				static_cast<double>(features.device_width) / static_cast<double>(features.device_height) * 100.0);
+			if (ratio_feat >= ratio_this)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_max_device_aspect_ratio:
+		if (features.device_height && val2)
+		{
+			const int ratio_this = round_d(static_cast<double>(val) / static_cast<double>(val2) * 100);
+			const int ratio_feat = round_d(
+				static_cast<double>(features.device_width) / static_cast<double>(features.device_height) * 100.0);
+			if (ratio_feat <= ratio_this)
+			{
+				return true;
+			}
+		}
+		break;
+
+	case media_feature_color:
+		{
+			if (check_as_bool)
+			{
+				return features.color != 0;
+			}
+			if (features.color == val)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_min_color:
+		if (features.color >= val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_max_color:
+		if (features.color <= val)
+		{
+			return true;
+		}
+		break;
+
+	case media_feature_color_index:
+		{
+			if (check_as_bool)
+			{
+				return features.color_index != 0;
+			}
+			if (features.color_index == val)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_min_color_index:
+		if (features.color_index >= val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_max_color_index:
+		if (features.color_index <= val)
+		{
+			return true;
+		}
+		break;
+
+	case media_feature_monochrome:
+		{
+			if (check_as_bool)
+			{
+				return features.monochrome != 0;
+			}
+			if (features.monochrome == val)
+			{
+				return true;
+			}
+		}
+		break;
+	case media_feature_min_monochrome:
+		if (features.monochrome >= val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_max_monochrome:
+		if (features.monochrome <= val)
+		{
+			return true;
+		}
+		break;
+
+	case media_feature_resolution:
+		if (features.resolution == val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_min_resolution:
+		if (features.resolution >= val)
+		{
+			return true;
+		}
+		break;
+	case media_feature_max_resolution:
+		if (features.resolution <= val)
+		{
+			return true;
+		}
+		break;
+	default:
+		return false;
+	}
+
+	return false;
+}
+
+
+void css_element_selector::parse(const std::string& text)
+{
+	auto el_end = text.find_first_of(".#[:");
+
+	m_tag = trim_lower(text.substr(0, el_end));
+
+	while (el_end != std::string::npos)
+	{
+		if (text[el_end] == '.')
+		{
+			css_attribute_selector attribute;
+
+			auto pos = text.find_first_of(".#[:", el_end + 1);
+			attribute.val = text.substr(el_end + 1, pos - el_end - 1);
+			attribute.condition = select_equal;
+			attribute.attribute = "class";
+			m_attrs.push_back(attribute);
+			el_end = pos;
+		}
+		else if (text[el_end] == ':')
+		{
+			css_attribute_selector attribute;
+
+			if (text[el_end + 1] == ':')
+			{
+				auto pos = text.find_first_of(".#[:", el_end + 2);
+				attribute.val = trim_lower(text.substr(el_end + 2, pos - el_end - 2));
+				attribute.condition = select_pseudo_element;
+				attribute.attribute = "pseudo-el";
+				m_attrs.push_back(attribute);
+				el_end = pos;
+			}
+			else
+			{
+				auto pos = text.find_first_of(".#[:(", el_end + 1);
+				if (pos != std::string::npos && text.at(pos) == '(')
+				{
+					pos = find_close_bracket(text, pos);
+					if (pos != std::string::npos)
+					{
+						pos++;
+					}
+				}
+				if (pos != std::string::npos)
+				{
+					attribute.val = trim_lower(text.substr(el_end + 1, pos - el_end - 1));
+				}
+				else
+				{
+					attribute.val = trim_lower(text.substr(el_end + 1));
+				}
+
+				if (attribute.val == "after" || attribute.val == "before")
+				{
+					attribute.condition = select_pseudo_element;
+				}
+				else
+				{
+					attribute.condition = select_pseudo_class;
+				}
+				attribute.attribute = "pseudo";
+				m_attrs.push_back(attribute);
+				el_end = pos;
+			}
+		}
+		else if (text[el_end] == '#')
+		{
+			css_attribute_selector attribute;
+
+			auto pos = text.find_first_of(".#[:", el_end + 1);
+			attribute.val = text.substr(el_end + 1, pos - el_end - 1);
+			attribute.condition = select_equal;
+			attribute.attribute = "id";
+			m_attrs.push_back(attribute);
+			el_end = pos;
+		}
+		else if (text[el_end] == '[')
+		{
+			css_attribute_selector attribute;
+
+			auto pos = text.find_first_of("]~=|$*^", el_end + 1);
+			std::string attr = trim_lower(text.substr(el_end + 1, pos - el_end - 1));
+
+			if (pos != std::string::npos)
+			{
+				if (text[pos] == ']')
+				{
+					attribute.condition = select_exists;
+				}
+				else if (text[pos] == '=')
+				{
+					attribute.condition = select_equal;
+					pos++;
+				}
+				else if (text.substr(pos, 2) == "~=")
+				{
+					attribute.condition = select_contain_str;
+					pos += 2;
+				}
+				else if (text.substr(pos, 2) == "|=")
+				{
+					attribute.condition = select_start_str;
+					pos += 2;
+				}
+				else if (text.substr(pos, 2) == "^=")
+				{
+					attribute.condition = select_start_str;
+					pos += 2;
+				}
+				else if (text.substr(pos, 2) == "$=")
+				{
+					attribute.condition = select_end_str;
+					pos += 2;
+				}
+				else if (text.substr(pos, 2) == "*=")
+				{
+					attribute.condition = select_contain_str;
+					pos += 2;
+				}
+				else
+				{
+					attribute.condition = select_exists;
+					pos += 1;
+				}
+				pos = text.find_first_not_of(" \t", pos);
+				if (pos != std::string::npos)
+				{
+					if (text[pos] == '"')
+					{
+						auto pos2 = text.find_first_of("\"", pos + 1);
+						attribute.val = text.substr(pos + 1, pos2 == std::string::npos ? pos2 : pos2 - pos - 1);
+						pos = pos2 == std::string::npos ? pos2 : pos2 + 1;
+					}
+					else if (text[pos] == ']')
+					{
+						pos++;
+					}
+					else
+					{
+						auto pos2 = text.find_first_of("]", pos + 1);
+						attribute.val = text.substr(pos, pos2 == std::string::npos ? pos2 : pos2 - pos);
+						pos = pos2 == std::string::npos ? pos2 : pos2 + 1;
+					}
+				}
+			}
+			else
+			{
+				attribute.condition = select_exists;
+			}
+			attribute.attribute = attr;
+			m_attrs.push_back(attribute);
+			el_end = pos;
+		}
+		else
+		{
+			el_end++;
+		}
+
+		el_end = text.find_first_of(".#[:", el_end);
+	}
+}
+
+
+// Index of the rightmost combinator at nesting depth zero. Characters inside
+// ( ) or [ ] belong to a functional pseudo-class or an attribute selector, so
+// ":nth-child(2n+1)" must not be split at its '+'.
+static std::string::size_type find_last_combinator(const std::string& text)
+{
+	auto found = std::string::npos;
+	int depth = 0;
+
+	for (std::string::size_type i = 0; i < text.size(); ++i)
+	{
+		const auto c = text[i];
+
+		if (c == '(' || c == '[') ++depth;
+		else if ((c == ')' || c == ']') && depth) --depth;
+		else if (!depth && (c == ' ' || c == '\t' || c == '>' || c == '+' || c == '~')) found = i;
+	}
+
+	return found;
+}
+
+bool css_selector::parse(const std::string& text)
+{
+	if (text.empty())
+	{
+		return false;
+	}
+
+	const auto split = find_last_combinator(text);
+
+	if (split == std::string::npos)
+	{
+		m_right.parse(trim_lower(text));
+		return true;
+	}
+
+	m_right.parse(trim_lower(text.substr(split + 1)));
+
+	// The combinator is whatever sits in the run of whitespace and operator
+	// characters between the two compounds, so "a>b" and "a > b" agree.
+	auto left = text.substr(0, split + 1);
+
+	while (!left.empty())
+	{
+		const auto c = left.back();
+
+		if (c == '>') m_combinator = combinator_child;
+		else if (c == '+') m_combinator = combinator_adjacent_sibling;
+		else if (c == '~') m_combinator = combinator_general_sibling;
+		else if (c != ' ' && c != '\t') break;
+
+		left.pop_back();
+	}
+
+	if (!left.empty())
+	{
+		m_left = std::make_shared<css_selector>(nullptr, std::shared_ptr<media_query_list>());
+
+		if (!m_left->parse(trim_lower(left)))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void css_selector::calc_specificity()
+{
+	if (!m_right.m_tag.empty() && m_right.m_tag != "*")
+	{
+		m_specificity += 0x0001;
+	}
+
+	for (const auto& a : m_right.m_attrs)
+	{
+		if (a.attribute == "id")
+		{
+			m_specificity += 0x0100;
+		}
+		else if (a.attribute == "class")
+		{
+			auto tokens = split_string(a.val);
+			m_specificity += static_cast<int>(tokens.size()) * 0x0010;
+		}
+		else if (a.condition == select_pseudo_element)
+		{
+			m_specificity += 0x0001;
+		}
+		else
+		{
+			m_specificity += 0x0010;
+		}
+	}
+
+	if (m_left)
+	{
+		m_left->calc_specificity();
+		m_specificity += m_left->m_specificity;
+	}
+}
+
+void css_selector::add_media_to_doc(const std::shared_ptr<document>& doc) const
+{
+	if (m_media_query && doc)
+	{
+		doc->add_media_list(m_media_query);
+	}
+}
+
+void css::parse_user_agent_stylesheet(const std::string& str, document& doc,
+                                      std::shared_ptr<media_query_list>& media)
+{
+	m_parsing_user_agent = true;
+	parse_stylesheet(str, empty, doc, media);
+	m_parsing_user_agent = false;
+}
+
+void css::parse_stylesheet(const std::string& str, const std::string& baseurl, document& doc,
+                           std::shared_ptr<media_query_list>& media)
+{
+	std::string text = str;
+
+	// remove comments
+	auto c_start = text.find("/*");
+
+	while (c_start != std::string::npos)
+	{
+		const auto c_end = text.find("*/", c_start + 2);
+		text.erase(c_start, c_end - c_start + 2);
+		c_start = text.find("/*");
+	}
+
+	auto pos = text.find_first_not_of(" \n\r\t");
+
+	while (pos != std::string::npos)
+	{
+		while (pos != std::string::npos && text[pos] == '@')
+		{
+			const auto sPos = pos;
+			pos = text.find_first_of('{', pos);
+
+			if (pos != std::string::npos && text[pos] == '{')
+			{
+				pos = find_close_bracket(text, pos, '{', '}');
+			}
+			if (pos != std::string::npos)
+			{
+				parse_atrule(text.substr(sPos, pos - sPos + 1), baseurl, doc, media);
+			}
+			else
+			{
+				parse_atrule(text.substr(sPos), baseurl, doc, media);
+			}
+
+			if (pos != std::string::npos)
+			{
+				pos = text.find_first_not_of(" \n\r\t", pos + 1);
+			}
+		}
+
+		if (pos == std::string::npos)
+		{
+			break;
+		}
+
+		const auto style_start = text.find_first_of("{", pos);
+		const auto style_end = text.find_first_of("}", pos);
+
+		if (style_start != std::string::npos && style_end != std::string::npos)
+		{
+			auto selectors = text.substr(pos, style_start - pos);
+			auto styles = text.substr(style_start + 1, style_end - style_start - 1);
+
+			auto st = std::make_shared<style>();
+			st->add(styles, baseurl);
+
+			parse_selectors(selectors, st, media);
+
+			if (media)
+			{
+				doc.add_media_list(media);
+			}
+
+			pos = style_end + 1;
+		}
+		else
+		{
+			pos = std::string::npos;
+		}
+
+		if (pos != std::string::npos)
+		{
+			pos = text.find_first_not_of(" \n\r\t", pos);
+		}
+	}
+}
+
+std::string css::parse_css_url(const std::string& str)
+{
+	std::string result;
+
+	const size_t pos1 = str.find_first_of('(');
+	const size_t pos2 = str.find_first_of(')');
+
+	if (pos1 != std::string::npos && pos2 != std::string::npos)
+	{
+		result = str.substr(pos1 + 1, pos2 - pos1 - 1);
+		if (result.length())
+		{
+			if (result[0] == '\'' || result[0] == '"')
+			{
+				result.erase(0, 1);
+			}
+		}
+		if (result.length())
+		{
+			if (result[result.length() - 1] == '\'' || result[result.length() - 1] == '"')
+			{
+				result.erase(result.length() - 1, 1);
+			}
+		}
+	}
+
+	return result;
+}
+
+void css::parse_selectors(const std::string& text, const std::shared_ptr<style>& styles,
+                          std::shared_ptr<media_query_list>& media)
+{
+	const auto tokens = split_string(text, ',');
+
+	for (auto tok : tokens)
+	{
+		auto selector = std::make_shared<css_selector>(styles, media);
+
+		if (selector->parse(tok))
+		{
+			selector->calc_specificity();
+			add_selector(selector);
+		}
+	}
+}
+
+void css::sort_selectors()
+{
+	sort(m_selectors.begin(), m_selectors.end(), std::less<std::shared_ptr<css_selector>>());
+	rebuild_buckets();
+}
+
+// Classify each selector by the most specific part of its rightmost compound.
+// Priority: id > class > tag > universal. A class-keyed selector may require
+// multiple classes (e.g. ".foo.bar"); we register it in every matching bucket so
+// the element probe finds it on ANY of its required classes, and the existing
+// per-selector match re-checks the rest.
+static selector_key compute_selector_key(const css_selector& sel)
+{
+	selector_key key;
+
+	for (const auto& a : sel.m_right.m_attrs)
+	{
+		if (a.attribute == "id" && a.condition == select_equal)
+		{
+			key.kind = selector_key::bucket_id;
+			key.values = {a.val};
+			return key;
+		}
+	}
+
+	std::vector<std::string> all_classes;
+	for (const auto& a : sel.m_right.m_attrs)
+	{
+		if (a.attribute == "class" && a.condition == select_equal)
+		{
+			auto tokens = split_string(a.val);
+			for (auto& t : tokens)
+			{
+				trim(t);
+				if (!t.empty()) all_classes.push_back(std::move(t));
+			}
+		}
+	}
+	if (!all_classes.empty())
+	{
+		key.kind = selector_key::bucket_class;
+		key.values = std::move(all_classes);
+		return key;
+	}
+
+	if (!sel.m_right.m_tag.empty() && sel.m_right.m_tag != "*")
+	{
+		key.kind = selector_key::bucket_tag;
+		key.values = {sel.m_right.m_tag};
+		return key;
+	}
+
+	key.kind = selector_key::bucket_universal;
+	return key;
+}
+
+void css::rebuild_buckets()
+{
+	m_by_id.clear();
+	m_by_class.clear();
+	m_by_tag.clear();
+	m_universal.clear();
+
+	for (const auto& sel : m_selectors)
+	{
+		sel->m_key = compute_selector_key(*sel);
+		switch (sel->m_key.kind)
+		{
+		case selector_key::bucket_id:
+			m_by_id[sel->m_key.values.front()].push_back(sel);
+			break;
+		case selector_key::bucket_class:
+			for (const auto& c : sel->m_key.values)
+			{
+				m_by_class[c].push_back(sel);
+			}
+			break;
+		case selector_key::bucket_tag:
+			m_by_tag[sel->m_key.values.front()].push_back(sel);
+			break;
+		case selector_key::bucket_universal:
+			m_universal.push_back(sel);
+			break;
+		}
+	}
+}
+
+void css::parse_atrule(const std::string& text, const std::string& baseurl, document& doc,
+                       std::shared_ptr<media_query_list>& media)
+{
+	if (text.substr(0, 7) == "@import")
+	{
+		constexpr int sPos = 7;
+		std::string iStr = text.substr(sPos);
+		if (iStr[iStr.length() - 1] == ';')
+		{
+			iStr.erase(iStr.length() - 1);
+		}
+		trim(iStr);
+		auto tokens = split_string(iStr, " ");
+		if (!tokens.empty())
+		{
+			auto url = parse_css_url(tokens.front());
+
+			if (url.empty())
+			{
+				url = tokens.front();
+			}
+			tokens.erase(tokens.begin());
+			std::string css_baseurl;
+
+			if (!baseurl.empty())
+			{
+				css_baseurl = baseurl;
+			}
+
+			doc.import_css(url, css_baseurl);
+
+			/*if (!css_text.empty())
+			{
+			std::shared_ptr<media_query_list> new_media = media;
+			if (!tokens.empty())
+			{
+			std::string media_str;
+			for (const auto &tok : tokens)
+			{
+			if (iter != tokens.begin())
+			{
+			media_str += " ";
+			}
+			media_str += (*iter);
+			}
+			new_media = media_query_list::create_from_string(media_str, doc);
+			if (!new_media)
+			{
+			new_media = media;
+			}
+			}
+			parse_stylesheet(css_text, css_baseurl, doc, new_media);
+			}*/
+		}
+	}
+	else if (text.substr(0, 6) == "@media")
+	{
+		const auto b1 = text.find_first_of('{');
+		const auto b2 = text.find_last_of('}');
+
+		if (b1 != std::string::npos)
+		{
+			std::string media_type = text.substr(6, b1 - 6);
+			trim(media_type);
+			std::shared_ptr<media_query_list> new_media = media_query_list::create_from_string(media_type);
+
+			std::string media_style;
+			if (b2 != std::string::npos)
+			{
+				media_style = text.substr(b1 + 1, b2 - b1 - 1);
+			}
+			else
+			{
+				media_style = text.substr(b1 + 1);
+			}
+
+			parse_stylesheet(media_style, baseurl, doc, new_media);
+		}
+	}
+	else if (text.substr(0, 9) == "@supports")
+	{
+		// Include @supports content unconditionally — optimistic feature detection
+		const auto b1 = text.find_first_of('{');
+		const auto b2 = text.find_last_of('}');
+
+		if (b1 != std::string::npos)
+		{
+			std::string supports_style;
+			if (b2 != std::string::npos)
+			{
+				supports_style = text.substr(b1 + 1, b2 - b1 - 1);
+			}
+			else
+			{
+				supports_style = text.substr(b1 + 1);
+			}
+
+			parse_stylesheet(supports_style, baseurl, doc, media);
+		}
+	}
+}
+
+
+static size get_img_size(const image_ptr& img)
+{
+	return img ? img->dimensions() : size{};
+}
+
+static void draw_img(device_context& dc, const image_ptr& img, const position& pos)
+{
+	if (img && pos.width > 0 && pos.height > 0)
+	{
+		dc.draw_image(img, pos);
+	}
+}
+
+static void draw_img_bg(device_context& dc, const image_ptr& bgimg, const position& draw_pos,
+                        const position& pos, const background_repeat repeat, background_attachment /*attachment*/)
+{
+	if (!bgimg) return;
+
+	const auto dim = bgimg->dimensions();
+	const int img_width = dim.width;
+	const int img_height = dim.height;
+
+	if (img_width <= 0 || img_height <= 0) return;
+
+	dc.push_clip(draw_pos);
+
+	const auto blit = [&](const int x, const int y)
+	{
+		dc.draw_image(bgimg, position(x, y, img_width, img_height));
+	};
+
+	switch (repeat)
+	{
+	case background_repeat_no_repeat:
+		blit(pos.x, pos.y);
+		break;
+	case background_repeat_repeat_x:
+		for (int x = pos.left(); x < pos.right(); x += img_width)
+			blit(x, pos.top());
+		for (int x = pos.left() - img_width; x + img_width > draw_pos.left(); x -= img_width)
+			blit(x, pos.top());
+		break;
+	case background_repeat_repeat_y:
+		for (int y = pos.top(); y < pos.bottom(); y += img_height)
+			blit(pos.left(), y);
+		for (int y = pos.top() - img_height; y + img_height > draw_pos.top(); y -= img_height)
+			blit(pos.left(), y);
+		break;
+	case background_repeat_repeat:
+		for (int x = pos.left(); x < pos.right(); x += img_width)
+			for (int y = pos.top(); y < pos.bottom(); y += img_height)
+				blit(x, y);
+		break;
+	}
+
+	dc.pop_clip();
+}
+
+
+void renderer::draw_text(const char* text, const font_handle hFont, const web_color& color, const position& pos)
+{
+	apply_clip();
+	_ctx->draw_text(pos.left(), pos.top(), text ? text : "", hFont, color);
+	release_clip();
+}
+
+void renderer::fill_rect(const position& pos, const web_color& color, const css_border_radius& radius)
+{
+	apply_clip();
+	fill_rect(pos.x, pos.y, pos.width, pos.height, color, radius);
+	release_clip();
+}
+
+
+void renderer::draw_list_marker(const list_marker& marker)
+{
+	apply_clip();
+
+	// The element already sized the marker box to the bullet; insetting it
+	// again shrank a 16px font's disc to a 2px dot.
+	const int draw_x = marker.pos.x;
+	const int draw_y = marker.pos.y;
+	const int draw_width = marker.pos.width;
+	const int draw_height = marker.pos.height;
+
+	switch (marker.marker_type)
+	{
+	case list_style_type_circle:
+		{
+			draw_ellipse(draw_x, draw_y, draw_width, draw_height, marker.color, 1);
+		}
+		break;
+	case list_style_type_disc:
+		{
+			fill_ellipse(draw_x, draw_y, draw_width, draw_height, marker.color);
+		}
+		break;
+	case list_style_type_square:
+		{
+			fill_rect(draw_x, draw_y, draw_width, draw_height, marker.color, css_border_radius());
+		}
+		break;
+	}
+	release_clip();
+}
+
+void renderer::draw_image(const image_ptr& img, const position& pos)
+{
+	draw_img(*_ctx, img, pos);
+}
+
+size image_size(const image_ptr& img)
+{
+	return get_img_size(img);
+}
+
+
+void renderer::draw_background(renderer& renderer, const background_paint& bg)
+{
+	apply_clip();
+
+	if (bg.color.alpha > 0)
+	{
+		fill_rect(bg.border_box, bg.color, bg.border_radius);
+	}
+
+	const auto img = bg.image;
+
+	if (img)
+	{
+		const position pos(bg.position_x, bg.position_y, bg.image_size.width, bg.image_size.height);
+		const auto draw_pos = pos;
+		draw_img_bg(*_ctx, img, draw_pos, pos, bg.repeat, bg.attachment);
+	}
+
+	release_clip();
+}
+
+void renderer::set_clip(const position& pos, const bool valid_x, const bool valid_y)
+{
+	position clip_pos = pos;
+
+	if (!valid_x)
+	{
+		clip_pos.x = _client_pos.x;
+		clip_pos.width = _client_pos.width;
+	}
+	if (!valid_y)
+	{
+		clip_pos.y = _client_pos.y;
+		clip_pos.height = _client_pos.height;
+	}
+	m_clips.push_back(clip_pos);
+}
+
+void renderer::del_clip()
+{
+	if (!m_clips.empty())
+	{
+		m_clips.pop_back();
+	}
+}
+
+void renderer::apply_clip()
+{
+	if (!m_clips.empty())
+	{
+		_ctx->push_clip(m_clips.back());
+		++_clip_depth;
+	}
+}
+
+void renderer::release_clip()
+{
+	if (_clip_depth > 0)
+	{
+		_ctx->pop_clip();
+		--_clip_depth;
+	}
+}
+
+void renderer::draw_ellipse(const int x, const int y, const int width, const int height, const web_color& color,
+                                const int line_width)
+{
+	_ctx->draw_ellipse(position(x, y, width, height), color, line_width > 0 ? line_width : 1);
+}
+
+void renderer::fill_ellipse(const int x, const int y, const int width, const int height, const web_color& color)
+{
+	_ctx->fill_ellipse(position(x, y, width, height), color);
+}
+
+void renderer::fill_rect(const int x, const int y, const int width, const int height, const web_color& color,
+                             const css_border_radius& /*radius*/)
+{
+	// Corners are cascaded and measured but not yet painted rounded.
+	_ctx->fill_rect(position(x, y, width, height), color);
+}
+
+
+void renderer::draw_borders(const css_borders& borders, const position& draw_pos, bool /*root*/)
+{
+	apply_clip();
+
+	if (borders.left.width.val() != 0 && borders.left.style > border_style_hidden)
+	{
+		const int w = round_f(borders.left.width.val());
+		_ctx->fill_rect(position(draw_pos.left(), draw_pos.top(), w, draw_pos.height), borders.left.color);
+	}
+	if (borders.right.width.val() != 0 && borders.right.style > border_style_hidden)
+	{
+		const int w = round_f(borders.right.width.val());
+		_ctx->fill_rect(position(draw_pos.right() - w, draw_pos.top(), w, draw_pos.height),
+		                borders.right.color);
+	}
+	if (borders.top.width.val() != 0 && borders.top.style > border_style_hidden)
+	{
+		const int h = round_f(borders.top.width.val());
+		_ctx->fill_rect(position(draw_pos.left(), draw_pos.top(), draw_pos.width, h), borders.top.color);
+	}
+	if (borders.bottom.width.val() != 0 && borders.bottom.style > border_style_hidden)
+	{
+		const int h = round_f(borders.bottom.width.val());
+		_ctx->fill_rect(position(draw_pos.left(), draw_pos.bottom() - h, draw_pos.width, h),
+		                borders.bottom.color);
+	}
+
+	release_clip();
+}
+
+} // namespace webvis
