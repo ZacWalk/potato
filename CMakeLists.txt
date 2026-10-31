@@ -30,7 +30,7 @@ endif()
 include(FetchContent)
 FetchContent_Declare(libdesktop
     GIT_REPOSITORY https://github.com/ZacWalk/libdesktop.git
-    GIT_TAG        e7237cb2323b1638fec8f9c3b0165e28c50c0584
+    GIT_TAG        3d3b61378fc79444ba297abbb0b860793c72b2d3
 )
 FetchContent_MakeAvailable(libdesktop)
 
