@@ -190,6 +190,7 @@ FakesAssemblies/
 
 # CMake / Ninja
 /build/
+/tmp/
 /Exe/
 CMakeUserPresets.json
 debug_trace.log

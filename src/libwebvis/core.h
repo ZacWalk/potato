@@ -7,6 +7,9 @@
 
 #include <cstdint>
 #include <cstdarg>
+#include <cmath>
+#include <cstdio>
+#include <stdexcept>
 
 #include "webvis.h"
 
@@ -1081,7 +1084,7 @@ inline void trim(std::string& s)
 	s.erase(std::find_if(s.rbegin(), s.rend(), [](const int ch) { return !is_space_char(ch); }).base(), s.end());
 }
 
-inline std::string trimmed(__in const std::string& ss)
+inline std::string trimmed(const std::string& ss)
 {
 	auto s = ss;
 	trim(s);
@@ -1152,12 +1155,35 @@ inline void transform_text(std::string& text, const text_transform tt)
 	}
 }
 
+constexpr int ascii_lower(const unsigned char value)
+{
+	return value >= 'A' && value <= 'Z' ? value + ('a' - 'A') : value;
+}
+
+inline int nicmp(const char* l, const char* r, const size_t count)
+{
+	for (size_t i = 0; i < count; ++i)
+	{
+		const int left = ascii_lower(static_cast<unsigned char>(l[i]));
+		const int right = ascii_lower(static_cast<unsigned char>(r[i]));
+		if (left != right) return left - right;
+		if (left == 0) return 0;
+	}
+	return 0;
+}
+
 inline int icmp(const char* l, const char* r)
 {
 	if (l == r) return 0;
 	if (l == nullptr) return 1;
 	if (r == nullptr) return -1;
-	return _stricmp(l, r);
+	for (;; ++l, ++r)
+	{
+		const int left = ascii_lower(static_cast<unsigned char>(*l));
+		const int right = ascii_lower(static_cast<unsigned char>(*r));
+		if (left != right) return left - right;
+		if (left == 0) return 0;
+	}
 }
 
 inline int icmp(const std::string& l, const char* r)
@@ -1175,7 +1201,7 @@ inline bool is_equal(const char* l, const char* r)
 	if (l == r) return true;
 	if (l == nullptr) return false;
 	if (r == nullptr) return false;
-	return _stricmp(l, r) == 0;
+	return icmp(l, r) == 0;
 }
 
 inline bool is_equal(const std::string& l, const char* r)
@@ -1191,7 +1217,7 @@ inline bool is_equal(const std::string& l, const std::string& r)
 inline bool is_equal(const std::string_view l, const std::string_view r)
 {
 	if (l.size() != r.size()) return false;
-	return l.empty() || _strnicmp(l.data(), r.data(), l.size()) == 0;
+	return l.empty() || nicmp(l.data(), r.data(), l.size()) == 0;
 }
 
 static std::string format(const char* fmt, ...)
@@ -1200,12 +1226,18 @@ static std::string format(const char* fmt, ...)
 	va_start(arg_list, fmt);
 	va_list measure_list;
 	va_copy(measure_list, arg_list);
-	const auto length = _vscprintf(fmt, measure_list);
+	const auto length = std::vsnprintf(nullptr, 0, fmt, measure_list);
 	va_end(measure_list);
-
-	std::string result(length < 0 ? 0 : length, '\0');
-	if (length > 0) vsprintf_s(result.data(), result.size() + 1, fmt, arg_list);
+	if (length < 0)
+	{
+		va_end(arg_list);
+		throw std::runtime_error("Unable to format text.");
+	}
+	std::string result(static_cast<size_t>(length) + 1, '\0');
+	const auto written = std::vsnprintf(result.data(), result.size(), fmt, arg_list);
 	va_end(arg_list);
+	if (written != length) throw std::runtime_error("Unable to format text.");
+	result.resize(static_cast<size_t>(length));
 	return result;
 }
 
@@ -1216,22 +1248,22 @@ struct ltstr
 {
 	bool operator()(const char* s1, const char* s2) const
 	{
-		return _stricmp(s1, s2) < 0;
+		return icmp(s1, s2) < 0;
 	}
 
 	bool operator()(const std::string& s1, const std::string& s2) const
 	{
-		return _stricmp(s1.c_str(), s2.c_str()) < 0;
+		return icmp(s1.c_str(), s2.c_str()) < 0;
 	}
 
 	bool operator()(const std::string& s1, const char* s2) const
 	{
-		return _stricmp(s1.c_str(), s2) < 0;
+		return icmp(s1.c_str(), s2) < 0;
 	}
 
 	bool operator()(const char* s1, const std::string& s2) const
 	{
-		return _stricmp(s1, s2.c_str()) < 0;
+		return icmp(s1, s2.c_str()) < 0;
 	}
 };
 
@@ -1244,7 +1276,7 @@ struct ltstr_sv
 	bool operator()(const std::string_view s1, const std::string_view s2) const
 	{
 		const auto n = std::min(s1.size(), s2.size());
-		const auto r = n ? _strnicmp(s1.data(), s2.data(), n) : 0;
+		const auto r = n ? nicmp(s1.data(), s2.data(), n) : 0;
 		return r ? r < 0 : s1.size() < s2.size();
 	}
 };
@@ -1718,11 +1750,7 @@ public:
 
 	static void equal(const int expected, const int actual, const char* message = "Test")
 	{
-		static constexpr int size = 64;
-		char expected_text[size], actual_text[size];
-		_itoa_s(expected, expected_text, size, 10);
-		_itoa_s(actual, actual_text, size, 10);
-		equal(expected_text, actual_text, message);
+		equal(std::to_string(expected), std::to_string(actual), message);
 	}
 
 	static void equal(const bool expected, const bool actual, const char* message = "Test")

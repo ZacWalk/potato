@@ -8,7 +8,7 @@
 namespace webvis
 {
 
-auto prop_id_strings =
+const char* prop_id_strings =
 	"-potato-border-spacing-x;-potato-border-spacing-y;align-items;align-self;"
 	"background-attachment;background-clip;background-color;background-image;"
 	"background-image-baseurl;background-origin;background-position;background-repeat;"

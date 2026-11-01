@@ -320,7 +320,7 @@ namespace
 			{
 				return g_html_entities[i].Code;
 			}
-			if (!fallback && _strnicmp(code, name.data(), name.size()) == 0)
+			if (!fallback && nicmp(code, name.data(), name.size()) == 0)
 			{
 				fallback = g_html_entities[i].Code;
 			}

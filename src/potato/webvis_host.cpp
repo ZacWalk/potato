@@ -7,6 +7,7 @@
 
 #include "pch.h"
 #include "webvis_host.h"
+#include "core.h"
 
 #include <atomic>
 
@@ -160,7 +161,7 @@ namespace
 	std::string local_resource_path(const std::string& url)
 	{
 		std::string path = url;
-		if (path.size() >= 7 && _strnicmp(path.c_str(), "file://", 7) == 0) path = pf::resolve_url({}, path);
+		if (path.size() >= 7 && webvis::nicmp(path.c_str(), "file://", 7) == 0) path = pf::resolve_url({}, path);
 
 		const bool drive_path = path.size() >= 3 && std::isalpha(static_cast<unsigned char>(path[0])) &&
 			path[1] == ':' && pf::file_path::is_path_sep(path[2]);
@@ -273,7 +274,7 @@ std::string windows_face(const std::string_view css_family)
 
 	for (const auto& [generic, face] : generics)
 	{
-		if (name.size() == generic.size() && _strnicmp(name.data(), generic.data(), name.size()) == 0)
+		if (name.size() == generic.size() && webvis::nicmp(name.data(), generic.data(), name.size()) == 0)
 			return std::string(face);
 	}
 

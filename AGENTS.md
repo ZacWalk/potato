@@ -305,10 +305,11 @@ intuition is not a guide.
 - **Naming**: `lowercase_separated_by_underscores` for all identifiers — classes, functions, methods, variables, enum values. Member variables use `m_` prefix, private members use `_` prefix.
 - **File headers**: Every source file begins with a `//` comment describing its purpose.
 - **UTF-8 `std::string` everywhere.** `std::wstring` exists only inside the platform layer and the `pf::utf8_to_utf16` / `utf16_to_utf8` helpers, which convert at the Windows SDK boundary. Never let `wchar_t` leak into the engine.
-- Case-insensitive comparison via `is_equal` / `icmp` (`_stricmp`, `_strnicmp`) and the `ltstr` / `ltstr_sv` container comparators.
+- Case-insensitive vocabulary comparison via the portable ASCII `is_equal` / `icmp` / `nicmp` helpers and the `ltstr` / `ltstr_sv` container comparators. Do not use locale-dependent CRT comparisons for CSS or HTML keywords.
 - CSS keyword sets are semicolon-delimited string tables (e.g. `border_style_strings`) searched by `value_index`; `prop_id` / `prop_id_strings` do the same for property names, and anything absent from that table is discarded at parse time.
 - Custom CSS properties use the `-potato-` vendor prefix.
 - No external HTML/CSS library dependencies — everything is self-contained in `src/`.
+- `POTATO_BUILD_APP=OFF` builds libwebvis and its portable checks without fetching libdesktop; this is an engine build, not a non-Windows browser.
 - **libwebvis stays platform-free.** If the engine needs something from the
   machine, add it to `webvis::host` or `webvis::device_context` and implement it
   in `src/potato/webvis_host.cpp` — never reach for `pf::` from `src/libwebvis`.

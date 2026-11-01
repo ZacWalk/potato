@@ -95,7 +95,7 @@ int value_index(const std::string_view val, const char* strings, const int defVa
 		const auto delimLen = delim_end - delim_start;
 
 		if (static_cast<size_t>(delimLen) == val.size() &&
-			_strnicmp(delim_start, val.data(), delimLen) == 0)
+			nicmp(delim_start, val.data(), delimLen) == 0)
 		{
 			return idx;
 		}
@@ -163,7 +163,7 @@ namespace
 	{
 		for (size_t i = 0; i + 8 <= text.size(); ++i)
 		{
-			if (_strnicmp(text.data() + i, "charset", 7) != 0) continue;
+			if (nicmp(text.data() + i, "charset", 7) != 0) continue;
 
 			size_t p = i + 7;
 			while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) ++p;
@@ -196,7 +196,7 @@ namespace
 
 		for (size_t i = 0; i + 6 < head.size(); ++i)
 		{
-			if (head[i] != '<' || _strnicmp(head.data() + i + 1, "meta", 4) != 0) continue;
+			if (head[i] != '<' || nicmp(head.data() + i + 1, "meta", 4) != 0) continue;
 
 			size_t end = head.find('>', i);
 			if (end == std::string_view::npos) end = head.size();
@@ -475,7 +475,7 @@ static std::map<const char*, web_color, ltstr> colorMap;
 
 static bool can_parse(const char* str)
 {
-	return str != nullptr && (str[0] == '#' || _strnicmp(str, "rgb", 3) == 0 || _strnicmp(str, "hsl", 3) ==
+	return str != nullptr && (str[0] == '#' || nicmp(str, "rgb", 3) == 0 || nicmp(str, "hsl", 3) ==
 		0);
 }
 
@@ -542,7 +542,7 @@ static web_color parse_rgb(const char* str)
 			result.alpha = static_cast<byte>(safe_stol(alpha, 16));
 		}
 	}
-	else if (!_strnicmp(str, "rgb", 3))
+	else if (!nicmp(str, "rgb", 3))
 	{
 		std::string s = str;
 		auto pos = s.find('(');
@@ -589,7 +589,7 @@ static web_color parse_rgb(const char* str)
 			result.alpha = parse_alpha(tokens[3]);
 		}
 	}
-	else if (!_strnicmp(str, "hsl", 3))
+	else if (!nicmp(str, "hsl", 3))
 	{
 		std::string s = str;
 		auto pos = s.find('(');

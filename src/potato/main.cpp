@@ -62,8 +62,8 @@ namespace
 
 	bool is_web_url(const std::string_view url)
 	{
-		return (url.size() >= 7 && _strnicmp(url.data(), "http://", 7) == 0) ||
-			(url.size() >= 8 && _strnicmp(url.data(), "https://", 8) == 0);
+		return (url.size() >= 7 && nicmp(url.data(), "http://", 7) == 0) ||
+			(url.size() >= 8 && nicmp(url.data(), "https://", 8) == 0);
 	}
 
 	// True when two URLs name the same document, whatever their fragments. A

@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.21)
 
 project(potato LANGUAGES CXX VERSION 1.0.0)
 
-if(NOT MSVC)
+option(POTATO_BUILD_APP "Build the desktop browser (requires libdesktop's Windows backend)" ${WIN32})
+if(POTATO_BUILD_APP AND NOT MSVC)
     message(FATAL_ERROR "Potato targets the Windows SDK through MSVC; no other toolchain is supported.")
 endif()
 
@@ -12,15 +13,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Statically linked CRT, so the executable runs with no redistributable. Set
 # before the platform layer is pulled in, so it is built the same way.
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Both configurations carry debug information; Release keeps the optimisation
 # settings the performance notes in AGENTS.md were measured against.
 set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi /RTC1 /D_DEBUG")
-set(CMAKE_CXX_FLAGS_RELEASE "/Ox /Oi /Ot /Oy /GT /GF /Gy /fp:fast /Zi /DNDEBUG")
+    set(CMAKE_CXX_FLAGS_RELEASE "/Ox /Oi /Ot /Oy /GT /GF /Gy /fp:fast /Zi /DNDEBUG")
+endif()
 
 # Develop against a sibling libdesktop checkout when one exists; CI and a fresh
 # clone fall back to the pinned revision below.
+if(POTATO_BUILD_APP)
 if(NOT DEFINED FETCHCONTENT_SOURCE_DIR_LIBDESKTOP
    AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../libdesktop/CMakeLists.txt")
     set(FETCHCONTENT_SOURCE_DIR_LIBDESKTOP "${CMAKE_CURRENT_SOURCE_DIR}/../libdesktop"
@@ -30,9 +34,10 @@ endif()
 include(FetchContent)
 FetchContent_Declare(libdesktop
     GIT_REPOSITORY https://github.com/ZacWalk/libdesktop.git
-    GIT_TAG        3d3b61378fc79444ba297abbb0b860793c72b2d3
+    GIT_TAG        31aae322af6e0696a9597726705b1121bd31580b
 )
 FetchContent_MakeAvailable(libdesktop)
+endif()
 
 # ── libwebvis ────────────────────────────────────────────────────────────────
 # A standalone HTML/CSS layout and rendering engine. It deliberately does NOT
@@ -67,7 +72,7 @@ add_library(webvis STATIC
 add_library(webvis::webvis ALIAS webvis)
 
 target_include_directories(webvis PUBLIC src/libwebvis)
-target_compile_options(webvis PRIVATE /W3 /sdl /MP)
+target_compile_options(webvis PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/W3;/sdl;/MP>)
 target_precompile_headers(webvis PRIVATE src/libwebvis/pch.h)
 
 set_target_properties(webvis PROPERTIES
@@ -79,6 +84,7 @@ set_target_properties(webvis PROPERTIES
 # The browser: window, toolbar, navigation history, and the libdesktop backed
 # implementations of the libwebvis device_context and host interfaces.
 
+if(POTATO_BUILD_APP)
 platform_add_app(potato
     SOURCES
         src/potato/main.cpp
@@ -113,9 +119,15 @@ set_target_properties(potato PROPERTIES
 )
 
 target_precompile_headers(potato PRIVATE src/potato/pch.h)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(webvis_portable_tests tests/portable.cpp)
+    target_link_libraries(webvis_portable_tests PRIVATE webvis::webvis)
+    add_test(NAME webvis_portable COMMAND webvis_portable_tests)
+    set_tests_properties(webvis_portable PROPERTIES TIMEOUT 30 LABELS "potato;webvis")
+    if(POTATO_BUILD_APP)
     add_executable(potato_tests tests/smoke.cpp)
     add_test(NAME potato_unit COMMAND potato_tests)
     set_tests_properties(potato_unit PROPERTIES TIMEOUT 30 LABELS potato)
@@ -129,4 +141,5 @@ if(BUILD_TESTING)
     add_test(NAME potato_network COMMAND potato --test)
     set_tests_properties(potato_network PROPERTIES
         TIMEOUT 180 LABELS network WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+    endif()
 endif()

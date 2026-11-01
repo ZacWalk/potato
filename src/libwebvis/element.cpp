@@ -2650,7 +2650,7 @@ int element::select(const css_element_selector& selector, const bool apply_pseud
 					return select_no_match;
 				}
 				if (attr_value.length() < sa.val.length() ||
-					_strnicmp(attr_value.data(), sa.val.c_str(), sa.val.length()))
+					nicmp(attr_value.data(), sa.val.c_str(), sa.val.length()))
 				{
 					return select_no_match;
 				}
@@ -2667,7 +2667,7 @@ int element::select(const css_element_selector& selector, const bool apply_pseud
 					return select_no_match;
 				}
 				const auto offset = attr_value.length() - sa.val.length();
-				if (_strnicmp(attr_value.data() + offset, sa.val.c_str(), sa.val.length()) != 0)
+				if (nicmp(attr_value.data() + offset, sa.val.c_str(), sa.val.length()) != 0)
 				{
 					return select_no_match;
 				}

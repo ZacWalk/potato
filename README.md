@@ -51,6 +51,18 @@ uses the CMake and Ninja that ship with it.
 
 Output is `Exe\potato-64.exe`, or `potato-64d.exe` for Debug.
 
+The engine can also be built without the browser or libdesktop on another
+platform with a C++20 compiler:
+
+```powershell
+cmake -S . -B build\engine -DPOTATO_BUILD_APP=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build\engine
+ctest --test-dir build\engine -L webvis --output-on-failure
+```
+
+CSS vocabulary comparisons use ASCII case folding, independently of the
+machine's locale. The browser still requires libdesktop's Windows GUI backend.
+
 ## Diagnostics
 
 Potato is a GUI application, but every diagnostic mode writes to the console, so
