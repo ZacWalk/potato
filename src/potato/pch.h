@@ -1,5 +1,5 @@
 // pch.h - Precompiled header for the potato application. Includes the
-// libdesktop abstraction and the libwebvis public API. Intentionally does NOT
+// libdesktop core/platform/render/ui abstractions and the libwebvis public API. Intentionally does NOT
 // include any Windows SDK headers (windows.h, windowsx.h, commctrl.h,
 // shlwapi.h, strsafe.h, winhttp.h); those live only in the libdesktop backend.
 
@@ -25,5 +25,5 @@
 #include <unordered_map>
 #include <vector>
 
-#include "platform.h"
+#include "libdesktop/ui.h"
 #include "webvis.h"

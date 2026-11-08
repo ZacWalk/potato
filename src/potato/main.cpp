@@ -1,22 +1,93 @@
-// main.cpp - The potato browser: a toolbar with back/forward/refresh/home
-// buttons and an address bar across the top, the rendered document below, the
-// navigation history, and the headless CLI modes. Supplies libwebvis with its
-// device context and host through webvis_host.h.
+// main.cpp - The potato browser application. The frame is a libdesktop UI
+// application: drawn controls form the chrome and one element presents the
+// platform-free libwebvis document below them.
 
 #include "pch.h"
-#include "platform.h"
 #include "webvis_host.h"
 #include "document.h"
 #include "style.h"
+
+#include "libdesktop/render/software.h"
+#include "libdesktop/ui/controls.h"
+#include "libdesktop/ui/elements.h"
+#include "libdesktop/ui/menu_bar.h"
+
+#include <condition_variable>
+#include <limits>
 
 // The engine lives in namespace webvis; the browser is its only consumer here,
 // so it is pulled in wholesale rather than qualified at hundreds of sites.
 using namespace webvis;
 
+enum class icon_index
+{
+	none = 0,
+	back = 0xE72B,
+	forward = 0xE72A,
+	refresh = 0xE72C,
+	home = 0xE80F,
+	menu = 0xE700,
+	check = 0xE73E,
+	checkbox_off = 0xE739,
+	checkbox_on = 0xE73A,
+	radio_off = 0xECCA,
+	radio_on = 0xECCB,
+	close = 0xE74D,
+	maximize = 0xE922,
+	minimize = 0xE921,
+	restore = 0xE923,
+};
+
+enum class command_group
+{
+	none = 0,
+};
+
+enum class commands
+{
+	none = 0,
+	open,
+	exit,
+	back,
+	forward,
+	reload,
+	home,
+	test_page,
+};
+
 namespace
 {
 	// The one host instance, handed to libwebvis before any document exists.
 	potato_host g_host;
+
+	struct browser_options
+	{
+		bool console = false;
+		bool network_test = true;
+		std::string layout_path;
+		int layout_width = 1902;
+		int layout_repeats = 1;
+		bool layout_verbose = false;
+		int layout_dump = 0;
+		bool layout_dump_json = false;
+		std::string eval_url;
+		std::string startup_url;
+	};
+
+	std::vector<std::string> command_line_tokens(const std::string_view command_line)
+	{
+		std::vector<std::string> result;
+		for (const auto token : core::split(command_line, true))
+			result.emplace_back(core::unquote(token));
+		return result;
+	}
+
+	std::string read_file_string(const core::file_path& path)
+	{
+		auto data = platform::blob_from_file(path);
+		if (data.empty()) return {};
+		return {reinterpret_cast<const char*>(data.data()), data.size()};
+	}
 
 	// "caf%C3%A9" -> "café". Links percent-encode a fragment, but ids and names
 	// are written out literally.
@@ -32,7 +103,6 @@ namespace
 
 		std::string result;
 		result.reserve(text.size());
-
 		for (size_t i = 0; i < text.size(); ++i)
 		{
 			if (text[i] == '%' && i + 2 < text.size())
@@ -48,7 +118,6 @@ namespace
 			}
 			result.push_back(text[i]);
 		}
-
 		return result;
 	}
 
@@ -80,7 +149,6 @@ namespace
 		{
 			return c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 		};
-
 		for (size_t i = 0; i < a.size(); ++i)
 			if (fold(a[i]) != fold(b[i])) return false;
 		return true;
@@ -111,24 +179,17 @@ namespace
 	{
 		std::string result;
 		result.reserve(text.size());
-
 		for (const auto c : text)
 		{
 			switch (c)
 			{
-			case '&': result += "&amp;";
-				break;
-			case '<': result += "&lt;";
-				break;
-			case '>': result += "&gt;";
-				break;
-			case '"': result += "&quot;";
-				break;
-			default: result.push_back(c);
-				break;
+			case '&': result += "&amp;"; break;
+			case '<': result += "&lt;"; break;
+			case '>': result += "&gt;"; break;
+			case '"': result += "&quot;"; break;
+			default: result.push_back(c); break;
 			}
 		}
-
 		return result;
 	}
 
@@ -149,132 +210,57 @@ namespace
 			html_escape(decode_to_utf8(bytes, content_type)) + "</pre></body></html>";
 	}
 
-	// ── Content area ──────────────────────────────────────────────────────
-	// Reactor for the blank content child window. Paints a white background
-	// and centres a placeholder label.
-	class content_reactor final : public pf::frame_reactor, public view_host
+	ui::command_ptr make_command(std::string_view text, std::function<void()> invoke = {})
 	{
-		pf::window_frame_ptr _frame;
+		auto result = std::make_shared<ui::command>();
+		result->text = text;
+		result->toolbar_text = text;
+		result->tooltip_text = text;
+		result->invoke = std::move(invoke);
+		return result;
+	}
+	// ── Page element ──────────────────────────────────────────────────────
+	// The document remains a normal libwebvis view_host. It is an element only
+	// for frame layout and presentation; its input is handled by the frame host.
+	class page_element final : public ui::element, public view_host
+	{
 		std::shared_ptr<document> _doc;
 		std::function<void(const std::string&)> _on_open;
-		std::function<void(std::span<const pf::file_path>)> _on_drop_files;
-		std::function<void()> _on_focus_address;
+		std::function<void()> _request_invalidate;
+		std::function<void(platform::cursor)> _set_cursor;
 		std::function<void(const std::string&)> _on_diagnostic;
 		std::function<void(const std::string&, const std::string&)> _on_resource_started;
 		std::function<void(const std::string&, const std::string&, bool)> _on_resource_finished;
-		int _last_layout_width = 0; // width the document was laid out at; 0 forces a new layout
-		int _last_viewport_w = 0; // viewport width that layout was made for
-		int _layout_pass = 0;
 
+		// width the document was laid out at; 0 forces a new layout
+		int _last_layout_width = 0;
+		// viewport width that layout was made for
+		int _last_viewport_w = 0;
+		int _layout_pass = 0;
 		// Fragment of the URL on screen. It is re-applied after every layout, so
 		// a late stylesheet or image cannot push its target out of view, and is
 		// dropped as soon as the reader scrolls for themselves.
 		std::string _anchor;
-
 		// Scrolling state.
-		int _scroll_y = 0; // current scroll offset (document pixels)
-		int _content_height = 0; // total laid-out document height
-		int _viewport_h = 0; // last-known viewport height
+		// current scroll offset (document pixels)
+		int _scroll_y = 0;
+		// total laid-out document height
+		int _content_height = 0;
+		// last-known viewport height
+		int _viewport_h = 0;
 		bool _dragging_thumb = false;
-		int _drag_offset = 0; // mouse-y minus thumb-top at drag start
+		// mouse-y minus thumb-top at drag start
+		int _drag_offset = 0;
 
 		static constexpr int k_scrollbar_w = 14;
 		static constexpr int k_wheel_step = 60;
 		static constexpr int k_line_step = 40;
 
-	public:
-		void set_frame(pf::window_frame_ptr f) { _frame = std::move(f); }
-
-		void set_on_open(std::function<void(const std::string&)> f)
+		void invalidate_now() const
 		{
-			_on_open = std::move(f);
+			if (_request_invalidate) _request_invalidate();
 		}
 
-		void set_on_drop_files(std::function<void(std::span<const pf::file_path>)> f)
-		{
-			_on_drop_files = std::move(f);
-		}
-
-		void set_on_focus_address(std::function<void()> f)
-		{
-			_on_focus_address = std::move(f);
-		}
-
-		void set_on_diagnostic(std::function<void(const std::string&)> f)
-		{
-			_on_diagnostic = std::move(f);
-		}
-
-		void set_on_resource_started(
-			std::function<void(const std::string&, const std::string&)> f)
-		{
-			_on_resource_started = std::move(f);
-		}
-
-		void set_on_resource_finished(
-			std::function<void(const std::string&, const std::string&, bool)> f)
-		{
-			_on_resource_finished = std::move(f);
-		}
-
-		void load_html(const std::string& url, const std::string& html, const std::string& content_type = {},
-		               const std::string& anchor = {})
-		{
-			_last_layout_width = 0;
-			_scroll_y = 0;
-			_content_height = 0;
-			_anchor = anchor;
-			_doc.reset();
-			if (!html.empty())
-				_doc = document::create_from_bytes(*this, url, html, content_type);
-			if (_frame) _frame->invalidate();
-		}
-
-		bool has_document() const { return _doc != nullptr; }
-
-		// Navigation within the page on screen: scroll to the fragment's target
-		// rather than load the document again. No fragment means the top.
-		void scroll_to_anchor(const std::string& anchor)
-		{
-			_anchor = anchor;
-			if (_anchor.empty()) scroll_to(0);
-			else apply_anchor();
-		}
-
-		// ── view_host ──
-		void layout() override
-		{
-			_last_layout_width = 0;
-			if (_frame) _frame->invalidate();
-		}
-
-		void invalidate() override
-		{
-			if (_frame) _frame->invalidate();
-		}
-
-		void open(const std::string& url) override
-		{
-			if (_on_open) _on_open(url);
-		}
-
-		void diagnostic(const std::string& message) override
-		{
-			if (_on_diagnostic) _on_diagnostic(message);
-		}
-
-		void resource_started(const std::string& type, const std::string& url) override
-		{
-			if (_on_resource_started) _on_resource_started(type, url);
-		}
-
-		void resource_finished(const std::string& type, const std::string& url,
-		                       const bool success) override
-		{
-			if (_on_resource_finished) _on_resource_finished(type, url, success);
-		}
-
-	private:
 		// Width of the document layout area (viewport minus scrollbar gutter
 		// when one is needed). Pass 0 if unknown.
 		int doc_width(const int viewport_w) const
@@ -287,13 +273,12 @@ namespace
 			return _content_height > _viewport_h && _viewport_h > 0;
 		}
 
-		pf::irect scrollbar_track_rect(const pf::irect& client) const
+		core::recti scrollbar_track_rect(const core::recti& client) const
 		{
-			return pf::irect(client.right - k_scrollbar_w, client.top,
-			                 client.right, client.bottom);
+			return {client.right - k_scrollbar_w, client.top, client.right, client.bottom};
 		}
 
-		pf::irect scrollbar_thumb_rect(const pf::irect& client) const
+		core::recti scrollbar_thumb_rect(const core::recti& client) const
 		{
 			const auto track = scrollbar_track_rect(client);
 			if (_content_height <= 0 || _viewport_h <= 0) return track;
@@ -304,20 +289,18 @@ namespace
 			const int thumb_y = max_scroll == 0
 				                    ? track.top
 				                    : track.top + mul_div(track_h - thumb_h, _scroll_y, max_scroll);
-			return pf::irect(track.left, thumb_y, track.right, thumb_y + thumb_h);
+			return {track.left, thumb_y, track.right, thumb_y + thumb_h};
 		}
 
 		static int mul_div(const int a, const int b, const int c)
 		{
-			if (c == 0) return 0;
-			return static_cast<int>(static_cast<int64_t>(a) * b / c);
+			return c == 0 ? 0 : static_cast<int>(static_cast<int64_t>(a) * b / c);
 		}
 
 		void clamp_scroll()
 		{
 			const int max_scroll = std::max(0, _content_height - _viewport_h);
-			if (_scroll_y < 0) _scroll_y = 0;
-			if (_scroll_y > max_scroll) _scroll_y = max_scroll;
+			_scroll_y = std::clamp(_scroll_y, 0, max_scroll);
 		}
 
 		void scroll_to(const int y)
@@ -325,7 +308,7 @@ namespace
 			const int old = _scroll_y;
 			_scroll_y = y;
 			clamp_scroll();
-			if (_scroll_y != old && _frame) _frame->invalidate();
+			if (_scroll_y != old) invalidate_now();
 		}
 
 		// Scrolling the reader asked for: the fragment stops holding the view.
@@ -340,7 +323,6 @@ namespace
 		void apply_anchor()
 		{
 			if (!_doc || _anchor.empty() || _last_layout_width == 0) return;
-
 			int y = _doc->anchor_top(_anchor);
 			if (y < 0)
 			{
@@ -352,208 +334,23 @@ namespace
 			if (y >= 0) scroll_to(y);
 		}
 
-	public:
-		// ── pf::frame_reactor ──
-		uint32_t handle_message(pf::window_frame_ptr, const pf::message_type m,
-		                        const pf::message_params& params) override
+		// Map a CSS cursor name to a platform cursor shape.
+		static platform::cursor map_cursor(const std::string& css)
 		{
-			if (m == pf::message_type::drop_files)
-			{
-				if (_on_drop_files) _on_drop_files(params.dropped_paths);
-				return 0;
-			}
-			if (m == pf::message_type::erase_background) return 1;
-			return 0;
-		}
-
-		uint32_t handle_mouse(pf::window_frame_ptr, const pf::mouse_message_type m,
-		                      const pf::mouse_params& p) override
-		{
-			if (!_frame) return 0;
-
-			const auto client = _frame->get_client_rect();
-			const bool has_sb = needs_scrollbar();
-			const auto thumb = scrollbar_thumb_rect(client);
-			const auto track = scrollbar_track_rect(client);
-
-			// ── Scrollbar interaction (takes precedence over the document) ──
-			if (m == pf::mouse_message_type::mouse_wheel)
-			{
-				if (has_sb)
-				{
-					// wheel_delta is multiples of 120; positive = up.
-					user_scroll_to(_scroll_y - (p.wheel_delta * k_wheel_step) / 120);
-					return 1;
-				}
-				return 0;
-			}
-
-			if (_dragging_thumb)
-			{
-				if (m == pf::mouse_message_type::mouse_move && has_sb)
-				{
-					const int track_h = track.height();
-					const int thumb_h = thumb.height();
-					const int max_scroll = std::max(0, _content_height - _viewport_h);
-					const int rel = p.point.y - track.top - _drag_offset;
-					const int span = std::max(1, track_h - thumb_h);
-					user_scroll_to(mul_div(rel, max_scroll, span));
-					return 1;
-				}
-				if (m == pf::mouse_message_type::left_button_up)
-				{
-					_dragging_thumb = false;
-					_frame->release_capture();
-					return 1;
-				}
-				if (m == pf::mouse_message_type::set_cursor)
-				{
-					_frame->set_cursor_shape(pf::cursor_shape::arrow);
-					return 1;
-				}
-			}
-
-			if (m == pf::mouse_message_type::left_button_down && has_sb &&
-				track.contains(p.point))
-			{
-				if (thumb.contains(p.point))
-				{
-					_anchor.clear();
-					_dragging_thumb = true;
-					_drag_offset = p.point.y - thumb.top;
-					_frame->set_capture();
-				}
-				else
-				{
-					// Page up / page down on track click.
-					const int delta = std::max(40, _viewport_h - 20);
-					if (p.point.y < thumb.top) user_scroll_to(_scroll_y - delta);
-					else user_scroll_to(_scroll_y + delta);
-				}
-				return 1;
-			}
-
-			if (m == pf::mouse_message_type::set_cursor && has_sb &&
-				track.contains(p.point))
-			{
-				_frame->set_cursor_shape(pf::cursor_shape::arrow);
-				return 1;
-			}
-
-			if (!_doc) return 0;
-
-			// Map a CSS cursor name to a platform cursor shape.
-			auto map_css_cursor = [](const std::string& css) -> pf::cursor_shape
-			{
-				if (css == "pointer") return pf::cursor_shape::hand;
-				if (css == "text") return pf::cursor_shape::ibeam;
-				if (css == "wait" || css == "progress") return pf::cursor_shape::wait;
-				if (css == "ew-resize" || css == "col-resize" ||
-					css == "w-resize" || css == "e-resize")
-					return pf::cursor_shape::size_we;
-				if (css == "ns-resize" || css == "row-resize" ||
-					css == "n-resize" || css == "s-resize")
-					return pf::cursor_shape::size_ns;
-				return pf::cursor_shape::arrow;
-			};
-
-			// Win32 sends WM_SETCURSOR before WM_MOUSEMOVE; consume it so the
-			// class-default arrow cursor isn't restored after we set ours.
-			if (m == pf::mouse_message_type::set_cursor)
-			{
-				_frame->set_cursor_shape(map_css_cursor(_doc->cursor()));
-				return 1;
-			}
-
-			position::vector redraw_boxes;
-			bool changed = false;
-			const int x = p.point.x;
-			const int y = p.point.y + _scroll_y; // doc coords
-			const int cx = p.point.x;
-			const int cy = p.point.y; // viewport-relative
-
-			switch (m)
-			{
-			case pf::mouse_message_type::mouse_move:
-				changed = _doc->on_mouse_over(x, y, cx, cy, redraw_boxes);
-				_frame->set_cursor_shape(map_css_cursor(_doc->cursor()));
-				_frame->track_mouse_leave();
-				break;
-			case pf::mouse_message_type::left_button_down:
-				_frame->set_focus();
-				changed = _doc->on_lbutton_down(x, y, cx, cy, redraw_boxes);
-				break;
-			case pf::mouse_message_type::left_button_up:
-				changed = _doc->on_lbutton_up(x, y, cx, cy, redraw_boxes);
-				break;
-			case pf::mouse_message_type::mouse_leave:
-				changed = _doc->on_mouse_leave(redraw_boxes);
-				_frame->set_cursor_shape(pf::cursor_shape::arrow);
-				break;
-			default:
-				break;
-			}
-
-			if (changed)
-			{
-				if (redraw_boxes.empty())
-				{
-					_frame->invalidate();
-				}
-				else
-				{
-					for (const auto& b : redraw_boxes)
-						_frame->invalidate_rect(pf::irect(b.x, b.y - _scroll_y,
-						                                  b.x + b.width, b.y - _scroll_y + b.height));
-				}
-			}
-			return 0;
-		}
-
-		uint32_t handle_keyboard(pf::window_frame_ptr, const pf::keyboard_message_type t,
-		                         const pf::keyboard_params& p) override
-		{
-			if (t != pf::keyboard_message_type::key_down) return 0;
-
-			if (p.vk == pf::platform_key::F3)
-			{
-				if (_on_focus_address) _on_focus_address();
-				return 1;
-			}
-
-			// The page takes the focus when clicked, so it answers the usual
-			// scrolling keys.
-			if (!_doc || !_frame) return 0;
-			const int page = std::max(40, _viewport_h - 40);
-			const bool shift = _frame->is_key_down(pf::platform_key::Shift);
-
-			switch (p.vk)
-			{
-			case pf::platform_key::Up: user_scroll_to(_scroll_y - k_line_step);
-				return 1;
-			case pf::platform_key::Down: user_scroll_to(_scroll_y + k_line_step);
-				return 1;
-			case pf::platform_key::Prior: user_scroll_to(_scroll_y - page);
-				return 1;
-			case pf::platform_key::Next: user_scroll_to(_scroll_y + page);
-				return 1;
-			case pf::platform_key::Space: user_scroll_to(_scroll_y + (shift ? -page : page));
-				return 1;
-			case pf::platform_key::Home: user_scroll_to(0);
-				return 1;
-			case pf::platform_key::End: user_scroll_to(_content_height);
-				return 1;
-			default: return 0;
-			}
+			if (css == "pointer") return platform::cursor::link;
+			if (css == "text") return platform::cursor::text_select;
+			if (css == "ew-resize" || css == "col-resize" || css == "w-resize" || css == "e-resize")
+				return platform::cursor::left_right;
+			if (css == "ns-resize" || css == "row-resize" || css == "n-resize" || css == "s-resize")
+				return platform::cursor::up_down;
+			return platform::cursor::normal;
 		}
 
 		// Layout needs no draw context, so it can run without a window.
 		void do_layout(const int avail_w, const int avail_h)
 		{
 			if (!_doc) return;
-
 			_viewport_h = avail_h;
-
 			// A page taller than the viewport is laid out narrower than it, to
 			// leave room for the scrollbar, so the layout is cached against the
 			// viewport width it was made for rather than its own width; keyed on
@@ -561,7 +358,6 @@ namespace
 			if (_last_layout_width != 0 && _last_viewport_w == avail_w) return;
 
 			int layout_w = avail_w;
-
 			_doc->client_pos(position(0, 0, layout_w, _viewport_h));
 			_doc->render(layout_w);
 			_content_height = _doc->height();
@@ -578,79 +374,282 @@ namespace
 			_last_viewport_w = avail_w;
 			clamp_scroll();
 			++_layout_pass;
-			diagnostic(std::format("Layout {}: viewport={}x{}, document={}x{}",
-			                       _layout_pass, avail_w, _viewport_h,
-			                       _doc->width(), _doc->height()));
+			diagnostic(std::format("Layout {}: viewport={}x{}, document={}x{}", _layout_pass, avail_w,
+			                       _viewport_h, _doc->width(), _doc->height()));
 			_doc->diagnose_layout();
 			apply_anchor();
 		}
 
-		void handle_paint(pf::window_frame_ptr& frame, pf::draw_context& dc) override
+		void report_redraw(const position::vector& boxes)
 		{
-			if (!frame) return;
-			const auto rc = frame->get_client_rect();
-			dc.fill_solid_rect(rc, pf::color_t(255, 255, 255));
+			if (!boxes.empty() || _doc) invalidate_now();
+		}
 
-			if (!_doc)
+	public:
+		page_element() : ui::element(ui::flex_item::grow | ui::flex_item::stretch)
+		{
+			padding(0);
+		}
+
+		void set_callbacks(std::function<void()> invalidate_callback,
+		                  std::function<void(platform::cursor)> cursor_callback)
+		{
+			_request_invalidate = std::move(invalidate_callback);
+			_set_cursor = std::move(cursor_callback);
+		}
+
+		void set_on_open(std::function<void(const std::string&)> callback) { _on_open = std::move(callback); }
+		void set_on_diagnostic(std::function<void(const std::string&)> callback) { _on_diagnostic = std::move(callback); }
+		void set_on_resource_started(std::function<void(const std::string&, const std::string&)> callback)
+		{
+			_on_resource_started = std::move(callback);
+		}
+		void set_on_resource_finished(std::function<void(const std::string&, const std::string&, bool)> callback)
+		{
+			_on_resource_finished = std::move(callback);
+		}
+
+		void load_html(const std::string& url, const std::string& html, const std::string& content_type = {},
+		               const std::string& anchor = {})
+		{
+			_last_layout_width = 0;
+			_scroll_y = 0;
+			_content_height = 0;
+			_anchor = anchor;
+			_doc.reset();
+			if (!html.empty()) _doc = document::create_from_bytes(*this, url, html, content_type);
+			invalidate_now();
+		}
+
+		bool has_document() const { return _doc != nullptr; }
+
+		void scroll_to_anchor(const std::string& anchor)
+		{
+			_anchor = anchor;
+			if (_anchor.empty()) scroll_to(0);
+			else apply_anchor();
+		}
+
+		bool wheel_at(const core::pointi loc, const int delta)
+		{
+			if (!_doc || !bounds.contains(loc)) return false;
+			// delta is multiples of 120; positive = up.
+			user_scroll_to(_scroll_y - (delta * k_wheel_step) / 120);
+			return true;
+		}
+
+		bool key_down(const char32_t key, const platform::key_state keys)
+		{
+			// The page takes the focus when clicked, so it answers the usual
+			// scrolling keys.
+			if (!_doc) return false;
+			const int page = std::max(40, _viewport_h - 40);
+			const bool shift = keys.shift;
+			if (key == platform::keys::UP) { user_scroll_to(_scroll_y - k_line_step); return true; }
+			if (key == platform::keys::DOWN) { user_scroll_to(_scroll_y + k_line_step); return true; }
+			if (key == platform::keys::PRIOR) { user_scroll_to(_scroll_y - page); return true; }
+			if (key == platform::keys::NEXT) { user_scroll_to(_scroll_y + page); return true; }
+			if (key == platform::keys::SPACE) { user_scroll_to(_scroll_y + (shift ? -page : page)); return true; }
+			if (key == platform::keys::HOME) { user_scroll_to(0); return true; }
+			if (key == platform::keys::END) { user_scroll_to(_content_height); return true; }
+			return false;
+		}
+
+		void pointer_move(const core::pointi loc)
+		{
+			const auto local = loc - bounds.top_left();
+			const auto client = core::recti(bounds.extent());
+			const auto track = scrollbar_track_rect(client);
+			const bool has_sb = needs_scrollbar();
+			if (_dragging_thumb && has_sb)
 			{
-				_content_height = 0;
-				_viewport_h = rc.height();
+				const auto thumb = scrollbar_thumb_rect(client);
+				const int max_scroll = std::max(0, _content_height - _viewport_h);
+				const int span = std::max(1, track.height() - thumb.height());
+				user_scroll_to(mul_div(local.y - track.top - _drag_offset, max_scroll, span));
+				if (_set_cursor) _set_cursor(platform::cursor::normal);
 				return;
 			}
+			if (has_sb && track.contains(local))
+			{
+				if (_set_cursor) _set_cursor(platform::cursor::normal);
+				return;
+			}
+			if (!_doc) return;
+			position::vector redraw_boxes;
+			const bool changed = _doc->on_mouse_over(local.x, local.y + _scroll_y, local.x, local.y, redraw_boxes);
+			if (_set_cursor) _set_cursor(map_cursor(_doc->cursor()));
+			if (changed) report_redraw(redraw_boxes);
+		}
 
-			do_layout(rc.width(), rc.height());
+		void pointer_down(const core::pointi loc, const platform::key_state keys)
+		{
+			const auto local = loc - bounds.top_left();
+			const auto client = core::recti(bounds.extent());
+			const auto track = scrollbar_track_rect(client);
+			const auto thumb = scrollbar_thumb_rect(client);
+			if (_doc && needs_scrollbar() && track.contains(local))
+			{
+				_anchor.clear();
+				if (thumb.contains(local))
+				{
+					_dragging_thumb = true;
+					_drag_offset = local.y - thumb.top;
+				}
+				else
+				{
+					// Page up / page down on track click.
+					const int delta = std::max(40, _viewport_h - 20);
+					user_scroll_to(local.y < thumb.top ? _scroll_y - delta : _scroll_y + delta);
+				}
+				return;
+			}
+			if (!_doc) return;
+			position::vector redraw_boxes;
+			if (_doc->on_lbutton_down(local.x, local.y + _scroll_y, local.x, local.y, redraw_boxes))
+				report_redraw(redraw_boxes);
+			(void)keys;
+		}
 
-			const int layout_w = _last_layout_width;
-			const position client_pos(0, 0, layout_w, _viewport_h);
+		void pointer_up(const core::pointi loc, const platform::key_state keys)
+		{
+			if (_dragging_thumb)
+			{
+				_dragging_thumb = false;
+				return;
+			}
+			if (!_doc) return;
+			const auto local = loc - bounds.top_left();
+			position::vector redraw_boxes;
+			if (_doc->on_lbutton_up(local.x, local.y + _scroll_y, local.x, local.y, redraw_boxes))
+				report_redraw(redraw_boxes);
+			(void)keys;
+		}
+
+		void pointer_leave()
+		{
+			_dragging_thumb = false;
+			if (_doc)
+			{
+				position::vector redraw_boxes;
+				if (_doc->on_mouse_leave(redraw_boxes)) report_redraw(redraw_boxes);
+			}
+			if (_set_cursor) _set_cursor(platform::cursor::normal);
+		}
+		// ── ui::element ──
+		core::sizei measure(render::measure_context&, int width_limit) const override
+		{
+			return {width_limit, 1};
+		}
+
+		void layout(render::measure_context&, const core::recti bounds_in) override
+		{
+			bounds = bounds_in;
+			do_layout(bounds.width(), bounds.height());
+		}
+
+		void render(render::draw_context& dc, const core::pointi element_offset) const override
+		{
+			const auto page = bounds.offset(element_offset);
+			dc.draw_rect(page, core::color(core::rgb(255, 255, 255)));
+			if (!_doc) return;
+
+			auto* self = const_cast<page_element*>(this);
+			self->do_layout(page.width(), page.height());
+			const int layout_w = self->_last_layout_width;
+			const position client_pos(0, 0, layout_w, self->_viewport_h);
 			_doc->client_pos(client_pos);
-			potato_device_context device(dc);
+			potato_device_context device(dc, page.top_left());
 			renderer renderer(device, client_pos);
-
 			// Draw document translated by -scroll_y. The clip is in the same
 			// (translated) space as the positions element::draw tests against.
-			const position clip(0, 0, layout_w, _viewport_h);
-			_doc->draw(renderer, 0, -_scroll_y, &clip);
+			const position clip(0, 0, layout_w, self->_viewport_h);
+			{
+				render::scoped_clip scoped(dc, page);
+				_doc->draw(renderer, 0, -self->_scroll_y, &clip);
+			}
 
 			// Scrollbar overlay.
 			if (needs_scrollbar())
 			{
-				const auto track = scrollbar_track_rect(rc);
-				const auto thumb = scrollbar_thumb_rect(rc);
-				dc.fill_solid_rect(track, pf::color_t(240, 240, 240));
-				dc.fill_solid_rect(thumb, pf::color_t(180, 180, 180));
+				const auto track = scrollbar_track_rect(page);
+				const auto thumb = scrollbar_thumb_rect(page);
+				dc.draw_rect(track, core::color(core::rgb(240, 240, 240)));
+				dc.draw_rect(thumb, core::color(core::rgb(180, 180, 180)));
 			}
 		}
 
-		void handle_size(pf::window_frame_ptr&, pf::isize, pf::measure_context&) override
+		// ── view_host ──
+		void layout() override
 		{
 			_last_layout_width = 0;
+			invalidate_now();
+		}
+
+		void open(const std::string& url) override
+		{
+			if (_on_open) _on_open(url);
+		}
+
+		void invalidate() override { invalidate_now(); }
+
+		void diagnostic(const std::string& message) override
+		{
+			if (_on_diagnostic) _on_diagnostic(message);
+		}
+
+		void resource_started(const std::string& type, const std::string& url) override
+		{
+			if (_on_resource_started) _on_resource_started(type, url);
+		}
+
+		void resource_finished(const std::string& type, const std::string& url, const bool success) override
+		{
+			if (_on_resource_finished) _on_resource_finished(type, url, success);
 		}
 	};
 
-	// ── Main frame ────────────────────────────────────────────────────────
-	// Owns the toolbar (address bar + nav buttons) and the content child.
-	// Lays them out vertically on every WM_SIZE.
-	class main_frame_reactor final : public pf::frame_reactor,
-	                                 public std::enable_shared_from_this<main_frame_reactor>
+	int run_layout(const std::string& path, int width, int height, int repeats, bool verbose, int dump_depth, bool dump_json);
+	int run_self_test(bool network);
+
+	// ── Browser application ──────────────────────────────────────────────
+	class potato_app final : public ui::app, public ui::frame_host,
+	                         public std::enable_shared_from_this<potato_app>
 	{
-		pf::toolbar_frame_ptr _toolbar;
-		pf::window_frame_ptr _content;
-		std::shared_ptr<content_reactor> _content_reactor;
+		browser_options _options;
+		platform::setting_file_ptr _settings;
+		ui::frame_ptr _frame;
+		std::shared_ptr<ui::elements> _root;
+		std::shared_ptr<ui::elements> _chrome;
+		std::shared_ptr<page_element> _page;
+		ui::toolbar_ptr _navigation;
+		ui::edit_ptr _address;
+		ui::control_ptr _menu_bar;
+		std::vector<ui::command_ptr> _menus;
+		ui::command_ptr _back_command;
+		ui::command_ptr _forward_command;
+		ui::command_ptr _refresh_command;
+		ui::command_ptr _home_command;
+		ui::command_ptr _menu_command;
 
 		// Async HTTP session and the URL of the most recently loaded page.
-		pf::async_http_session_ptr _http;
-		pf::async_http_request_ptr _pending;
+		platform::async_http_session_ptr _http;
+		platform::async_http_request_ptr _pending;
 		std::string _current_url;
 		uint64_t _load_token = 0;
-		std::string _startup_url;
+		// Simple in-memory navigation history.
+		std::vector<std::string> _history;
+		size_t _history_pos = 0;
+
 		std::string _eval_url;
 		bool _eval_page_loaded = false;
 		int _eval_pending_resources = 0;
 		int _eval_failed_resources = 0;
-		std::chrono::steady_clock::time_point _eval_started;
-		std::chrono::steady_clock::time_point _eval_last_activity;
+		std::chrono::steady_clock::time_point _eval_started = std::chrono::steady_clock::now();
+		std::chrono::steady_clock::time_point _eval_last_activity = _eval_started;
 
-		static constexpr uint32_t k_eval_timer = 1;
+		bool can_go_back() const { return _history_pos > 0; }
+		bool can_go_forward() const { return _history_pos + 1 < _history.size(); }
 
 		void eval_log(const std::string& message)
 		{
@@ -658,52 +657,51 @@ namespace
 			_eval_last_activity = std::chrono::steady_clock::now();
 			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
 				_eval_last_activity - _eval_started).count();
-			pf::write_stdout(std::format("[{:6} ms] {}\n", elapsed, message));
+			platform::write_stdout(std::format("[{:6} ms] {}\n", elapsed, message));
 		}
 
-		// Simple in-memory navigation history.
-		std::vector<std::string> _history;
-		size_t _history_pos = 0;
-
-		bool can_go_back() const { return _history_pos > 0; }
-		bool can_go_forward() const { return _history_pos + 1 < _history.size(); }
-
-		void update_buttons() const
+		void update_buttons()
 		{
-			if (!_toolbar) return;
-			_toolbar->set_button_enabled(1, can_go_back());
-			_toolbar->set_button_enabled(2, can_go_forward());
+			if (!_navigation) return;
+			_back_command->enable = can_go_back();
+			_forward_command->enable = can_go_forward();
+			_navigation->update_button_state(false, false);
 		}
 
 		void focus_address()
 		{
-			if (!_toolbar) return;
-			_toolbar->focus_address();
-			_toolbar->select_all_address();
+			if (!_address) return;
+			_address->auto_completes(suggest(_address->window_text()));
+			_address->focus();
+			_address->select_all();
 		}
 
-		static pf::file_path absolute_file_path(const std::string_view value)
+		core::file_path absolute_file_path(const std::string_view value) const
 		{
 			std::string path(value);
-			if (path.starts_with("file://")) path = pf::resolve_url({}, path);
-
-			const bool drive_path = path.size() >= 3 && path[1] == ':' &&
-				pf::file_path::is_path_sep(path[2]);
-			const bool rooted_path = !path.empty() && pf::file_path::is_path_sep(path[0]);
+			if (path.starts_with("file://")) path = platform::resolve_url({}, path);
+			const bool drive_path = path.size() >= 3 && std::isalpha(static_cast<unsigned char>(path[0])) &&
+				path[1] == ':' && core::is_path_sep(path[2]);
+			const bool rooted_path = !path.empty() && core::is_path_sep(path[0]);
 			if (!drive_path && !rooted_path)
-				return pf::current_directory().combine(path);
-			return pf::file_path(path);
+			{
+				auto base = std::string(platform::current_directory().text());
+				if (!base.empty() && !core::is_path_sep(base.back())) base.push_back(core::preferred_path_sep);
+				path = base + path;
+			}
+			return core::file_path(path);
 		}
 
 		// What a person types into the address bar is not a reference relative
 		// to the page on screen: "example.com" names a site, not a sibling of the
 		// current document. Keep anything with a scheme or that names a local
 		// file, and treat the rest as a host name.
-		static std::string typed_url(const std::string_view text)
+		static std::string typed_url(const std::string_view text, const potato_app& app)
 		{
 			const auto first = text.find_first_not_of(" \t\r\n");
 			if (first == std::string_view::npos) return {};
-			std::string url(text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1));
+			const auto last = text.find_last_not_of(" \t\r\n");
+			std::string url(text.substr(first, last - first + 1));
 
 			if (has_scheme(url))
 			{
@@ -713,42 +711,36 @@ namespace
 				return url;
 			}
 
-			const bool drive_path = url.size() >= 2 && std::isalpha(static_cast<unsigned char>(url[0])) &&
-				url[1] == ':';
-			if (drive_path || pf::file_path::is_path_sep(url[0])) return url;
+			const bool drive_path = url.size() >= 2 && std::isalpha(static_cast<unsigned char>(url[0])) && url[1] == ':';
+			if (drive_path || core::is_path_sep(url[0])) return url;
 
 			// A path relative to the working directory, as on a command line.
-			if (const auto local = absolute_file_path(url); local.exists())
-				return std::string(local.view());
-
+			if (const auto local = app.absolute_file_path(url); platform::exists(local)) return local.str();
 			return "https://" + url;
 		}
 
-		void open_local_file(const pf::file_path& path)
+		void open_local_file(const core::file_path& path)
 		{
-			if (!path.empty() && path.exists())
-				navigate(std::string(path.view()));
+			if (!path.is_empty() && platform::exists(path)) navigate(path.str());
 		}
 
 		void choose_local_file()
 		{
-			// Embedded nulls separate the filter pairs, so the length is explicit.
-			static constexpr char filter_text[] =
-				"Web pages (*.htm, *.html)\0*.htm;*.html;*.xhtml\0Text files (*.txt)\0*.txt\0All files (*.*)\0*.*\0\0";
-			constexpr std::string_view filters(filter_text, sizeof(filter_text) - 1);
-			open_local_file(pf::open_file_path("Open HTML file", filters));
-		}
-
-		void open_dropped_files(const std::span<const pf::file_path> paths)
-		{
-			if (!paths.empty()) open_local_file(paths.front());
+			std::vector<core::file_path> paths;
+			const std::vector<platform::file_dialog_filter> filters = {
+				{"Web pages (*.htm, *.html)", "*.htm;*.html;*.xhtml"},
+				{"Text files (*.txt)", "*.txt"},
+				{"All files (*.*)", "*.*"},
+			};
+			if (platform::prompt_for_open_paths(nullptr, paths, filters, false, "Open HTML file") && !paths.empty())
+				open_local_file(paths.front());
 		}
 
 		std::vector<std::string> suggest(const std::string_view text) const
 		{
 			// Common bookmarks shown by default (no text) and folded into
 			// the filtered results when the user starts typing.
-			static const std::vector<std::string> bookmarks = {
+			static constexpr std::string_view bookmarks[] = {
 				"https://www.google.com/",
 				"https://en.wikipedia.org/wiki/Main_Page",
 				"https://www.bbc.com/news",
@@ -761,109 +753,168 @@ namespace
 
 			constexpr size_t max_results = 8;
 			std::vector<std::string> result;
-			std::set<std::string, ltstr> seen;
-
-			const auto add = [&](const std::string& s)
+			std::set<std::string> seen;
+			const auto add = [&](const std::string_view value)
 			{
-				if (result.size() >= max_results) return;
-				if (seen.insert(s).second) result.push_back(s);
+				if (result.size() < max_results && seen.insert(std::string(value)).second)
+					result.emplace_back(value);
 			};
 
+			// First focus / empty edit: show recent history first, then
+			// fill with bookmarks.
 			if (text.empty())
 			{
-				// First focus / empty edit: show recent history first, then
-				// fill with bookmarks.
 				for (auto it = _history.rbegin(); it != _history.rend(); ++it) add(*it);
-				for (const auto& b : bookmarks) add(b);
+				for (const auto bookmark : bookmarks) add(bookmark);
 				return result;
 			}
 
 			std::string needle(text);
 			for (auto& c : needle) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-
-			const auto matches = [&](const std::string& candidate)
+			const auto matches = [&](const std::string_view candidate)
 			{
-				std::string hay = candidate;
-				for (auto& c : hay) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-				return hay.find(needle) != std::string::npos;
+				for (size_t i = 0; i + needle.size() <= candidate.size(); ++i)
+				{
+					bool equal = true;
+					for (size_t j = 0; j < needle.size(); ++j)
+						if (std::tolower(static_cast<unsigned char>(candidate[i + j])) !=
+							std::tolower(static_cast<unsigned char>(needle[j]))) equal = false;
+					if (equal) return true;
+				}
+				return false;
 			};
 
 			for (auto it = _history.rbegin(); it != _history.rend(); ++it)
 				if (matches(*it)) add(*it);
-			for (const auto& b : bookmarks)
-				if (matches(b)) add(b);
-
+			for (const auto bookmark : bookmarks)
+				if (matches(bookmark)) add(bookmark);
+			return result;
+		}
+		// Browser-utility items only (no curated bookmarks).
+		std::vector<ui::command_ptr> make_utility_menu()
+		{
+			std::vector<ui::command_ptr> result;
+			result.push_back(make_command("&Back", [this] { go_back(); }));
+			result.back()->enable = can_go_back();
+			result.push_back(make_command("&Forward", [this] { go_forward(); }));
+			result.back()->enable = can_go_forward();
+			result.push_back(make_command("&Reload", [this] { reload(); }));
+			// separator
+			result.push_back(nullptr);
+			result.push_back(make_command("&Home", [this] { navigate("about:blank", false); }));
+			result.push_back(make_command("&Test page", [this] { navigate("res://test.htm", false); }));
+			result.push_back(make_command("&Open file...", [this] { choose_local_file(); }));
+			// separator
+			result.push_back(nullptr);
+			result.push_back(make_command("E&xit", [this] { if (_frame) _frame->close(); }));
 			return result;
 		}
 
-		// Follows a link or opens a URL the browser itself chose. A link from a
-		// document arrives already resolved; resolving again is harmless.
-		void navigate(const std::string& url, const bool relative_to_page = true)
+		std::vector<ui::command_ptr> make_file_menu()
 		{
-			std::string target = url;
-			if (relative_to_page && !_current_url.empty())
-			{
-				auto resolved = pf::resolve_url(_current_url, url);
-				if (!resolved.empty()) target = std::move(resolved);
-			}
-
-			// Truncate forward history when navigating from the middle.
-			if (_history_pos + 1 < _history.size())
-				_history.resize(_history_pos + 1);
-
-			if (_history.empty() || _history.back() != target)
-			{
-				_history.push_back(target);
-				_history_pos = _history.size() - 1;
-			}
-
-			show(target, false);
+			auto open = make_command("&Open...", [this] { choose_local_file(); });
+			open->kba.push_back({U'O', platform::keyboard_accelerator_t::control});
+			open->keyboard_accelerator_text = platform::format_keyboard_accelerator(open->kba);
+			return {open, nullptr, make_command("E&xit", [this] { if (_frame) _frame->close(); })};
 		}
-
-		// What the address bar hands over on Enter.
-		void navigate_typed(const std::string& text)
+		void build_ui()
 		{
-			const auto url = typed_url(text);
+			// ── Toolbar ──
+			_back_command = make_command("Back", [this] { go_back(); });
+			_back_command->icon = icon_index::back;
+			_back_command->toolbar_text.clear();
+			_forward_command = make_command("Forward", [this] { go_forward(); });
+			_forward_command->icon = icon_index::forward;
+			_forward_command->toolbar_text.clear();
+			_refresh_command = make_command("Refresh", [this] { reload(); });
+			_refresh_command->icon = icon_index::refresh;
+			_refresh_command->toolbar_text.clear();
+			_home_command = make_command("Home", [this] { navigate("about:blank", false); });
+			_home_command->icon = icon_index::home;
+			_home_command->toolbar_text.clear();
+			// Attach a hamburger menu to the right-hand "menu" button.
+			_menu_command = make_command("Menu");
+			_menu_command->icon = icon_index::menu;
+			_menu_command->toolbar_text.clear();
+			_menu_command->menu = [this] { return make_utility_menu(); };
 
-			if (url.empty())
+			ui::toolbar_styles toolbar_style;
+			toolbar_style.button_extent = {32, 30};
+			_navigation = ui::make_toolbar(toolbar_style,
+			                              {_back_command, _forward_command, _refresh_command, _home_command, _menu_command});
+
+			ui::edit_styles address_style;
+			address_style.rounded_corners = true;
+			address_style.select_all_on_focus = true;
+			address_style.cue = "Address";
+			address_style.capture_key_down = [this](const int key, const platform::key_state keys)
 			{
-				if (_toolbar && !_history.empty()) _toolbar->set_address_text(_history[_history_pos]);
-				return;
-			}
-
-			navigate(url, false);
-		}
-
-		// Shows a history entry. A fragment of the document already on screen
-		// only scrolls; anything else loads. Moving through history between
-		// entries of one document scrolls too, the way following its links did.
-		void show(const std::string& url, const bool traversal)
-		{
-			if (_toolbar) _toolbar->set_address_text(url);
-
-			const bool in_page = _content_reactor && _content_reactor->has_document() && !_pending &&
-				(traversal || url.find('#') != std::string::npos) && same_document(url, _current_url);
-
-			if (in_page)
+				const auto c = static_cast<char32_t>(key);
+				if (c == platform::keys::RETURN)
+				{
+					navigate_typed(_address->window_text());
+					if (_frame) _frame->focus();
+					return true;
+				}
+				if (c == platform::keys::ESCAPE)
+				{
+					_address->window_text(_current_url.empty() && !_history.empty() ? _history[_history_pos] : _current_url);
+					if (_frame) _frame->focus();
+					return true;
+				}
+				if (keys.control && (c == U'O' || c == U'o'))
+				{
+					choose_local_file();
+					return true;
+				}
+				return false;
+			};
+			_address = ui::make_edit(address_style, "about:blank", [this](const std::string& text)
 			{
-				_current_url = url;
-				_content_reactor->scroll_to_anchor(split_fragment(url).second);
-			}
-			else
+				if (_address) _address->auto_completes(suggest(text));
+			});
+
+			_navigation->flex = ui::flex_item::stretch;
+			_address->flex = ui::flex_item::grow | ui::flex_item::stretch;
+
+			auto file_menu = make_command("&File");
+			file_menu->menu = [this] { return make_file_menu(); };
+			_menus = {file_menu};
+			_menu_bar = ui::make_menu_bar(_menus);
+			_menu_bar->flex = ui::flex_item::stretch;
+
+			_chrome = std::make_shared<ui::elements>();
+			_chrome->padding(0);
+			_chrome->flex_container.direction = ui::flex_direction::row;
+			_chrome->flex_container.wrap = ui::flex_wrap::no_wrap;
+			_chrome->flex_container.align_items = ui::flex_align::stretch;
+			_chrome->add(_navigation);
+			_chrome->add(_address);
+			_chrome->add(_menu_bar);
+
+			// ── Content ──
+			_page = std::make_shared<page_element>();
+			_page->set_on_open([this](const std::string& url) { navigate(url); });
+			_page->set_on_diagnostic([this](const std::string& message) { eval_log(message); });
+			_page->set_on_resource_started([this](const std::string& type, const std::string& url)
 			{
-				load(url);
-			}
+				++_eval_pending_resources;
+				eval_log(std::format("{} request: {}", type, url));
+			});
+			_page->set_on_resource_finished([this](const std::string& type, const std::string& url, const bool success)
+			{
+				_eval_pending_resources = std::max(0, _eval_pending_resources - 1);
+				if (!success) ++_eval_failed_resources;
+				eval_log(std::format("{} {}: {}", type, success ? "loaded" : "failed", url));
+			});
 
-			update_buttons();
-		}
-
-		// Loads the current entry again without touching the history around it.
-		void reload()
-		{
-			if (_history.empty()) return;
-			const auto url = _history[_history_pos];
-			if (_toolbar) _toolbar->set_address_text(url);
-			load(url);
+			_root = std::make_shared<ui::elements>();
+			_root->padding(0);
+			_root->flex_container.direction = ui::flex_direction::column;
+			_root->flex_container.wrap = ui::flex_wrap::no_wrap;
+			_root->flex_container.align_items = ui::flex_align::stretch;
+			_root->add(_chrome);
+			_root->add(_page);
 		}
 
 		// Shows why `url` could not be displayed, so the address bar never names
@@ -877,15 +928,14 @@ namespace
 				html_escape(title) + "</h2><p>" + html_escape(url) + "</p>";
 			if (!detail.empty()) html += "<pre>" + html_escape(detail) + "</pre>";
 			html += "</body></html>";
-			_content_reactor->load_html(url, html);
+			_page->load_html(url, html);
 			_eval_page_loaded = true;
 		}
 
 		void load(const std::string& url)
 		{
-			if (!_content_reactor) return;
+			if (!_page) return;
 			eval_log(std::format("Navigation started: {}", url));
-
 			// Cancel any in-flight request for the previous navigation.
 			if (_pending)
 			{
@@ -895,73 +945,65 @@ namespace
 			++_load_token;
 
 			const auto [doc_url, fragment] = split_fragment(url);
-
 			if (doc_url == "res://test.htm" || doc_url == "about:blank")
 			{
 				_current_url = url;
-				_content_reactor->load_html(doc_url, std::string(pf::embedded_resource_text("test.htm")), {},
-				                            fragment);
+				_page->load_html(doc_url, std::string(platform::embedded_resource_text("test.htm")), {}, fragment);
 				// Loaded synchronously, like a local file; without this --eval of the
 				// built-in page waited out its 60-second cap.
 				_eval_page_loaded = true;
 				return;
 			}
 
-			if (!is_web_url(url))
+			if (!is_web_url(doc_url))
 			{
 				// A folder may itself contain '#', so the whole string is tried as a
 				// path before its tail is read as a fragment.
 				const std::pair<std::string, std::string> candidates[] = {{url, {}}, {doc_url, fragment}};
-
 				for (const auto& [candidate, anchor] : candidates)
 				{
 					if (candidate.empty()) continue;
 					const auto local_path = absolute_file_path(candidate);
-
-					if (pf::is_directory(local_path))
+					if (platform::is_directory(local_path))
 					{
 						show_error(url, "Cannot open a folder", {});
 						return;
 					}
+					if (!platform::exists(local_path)) continue;
 
-					if (!local_path.exists()) continue;
-
-					const auto path = std::string(local_path.view());
+					const auto path = local_path.str();
 					_current_url = url;
-					auto bytes = get_file_contents(path);
+					auto bytes = read_file_string(local_path);
 					if (path.size() >= 4 && is_equal(std::string_view(path).substr(path.size() - 4), ".txt"))
-						_content_reactor->load_html(path, plain_text_page(bytes, {}), "text/html; charset=utf-8",
-						                            anchor);
-					else
-						_content_reactor->load_html(path, bytes, "text/html", anchor);
+						_page->load_html(path, plain_text_page(bytes, {}), "text/html; charset=utf-8", anchor);
+					else _page->load_html(path, bytes, "text/html", anchor);
 					_eval_page_loaded = true;
 					return;
 				}
 			}
 
-			if (is_web_url(url))
+			if (is_web_url(doc_url))
 			{
+				if (!_http) _http = platform::create_async_http_session("potato/1.0");
 				if (!_http)
-					_http = pf::create_async_http_session("Potato/1.0");
+				{
+					show_error(url, "Failed to load", "The request could not be started.");
+					return;
+				}
 
 				const uint64_t token = _load_token;
-				std::weak_ptr<main_frame_reactor> weak_self = shared_from_this();
+				std::weak_ptr<potato_app> weak_self = shared_from_this();
 				auto body = std::make_shared<std::string>();
 				auto type = std::make_shared<std::string>();
-
-				pf::async_http_callbacks cb;
-				cb.on_headers = [weak_self, url, type](const int status, std::string content_type,
-				                                       const uint64_t content_length)
+				platform::async_http_callbacks cb;
+				cb.on_headers = [weak_self, type, url](const int status, std::string content_type, const uint64_t content_length)
 				{
-					pf::run_ui([weak_self, url, status, type, content_type = std::move(content_type),
-						content_length]
+					platform::run_ui([weak_self, type, url, status, content_type = std::move(content_type), content_length]
 					{
 						*type = content_type;
-
 						if (const auto self = weak_self.lock())
-							self->eval_log(std::format(
-								"Navigation headers: HTTP {}, type={}, length={}: {}",
-								status, content_type, content_length, url));
+							self->eval_log(std::format("Navigation headers: HTTP {}, type={}, length={}: {}", status,
+							                          content_type, content_length, url));
 					});
 				};
 				cb.on_data = [body](const uint8_t* data, const size_t size)
@@ -970,18 +1012,16 @@ namespace
 				};
 				cb.on_complete = [weak_self, body, type, url, token]
 				{
-					pf::run_ui([weak_self, body, type, url, token]
+					platform::run_ui([weak_self, body, type, url, token]
 					{
-						if (const auto self = weak_self.lock())
-							self->on_download_complete(token, url, *body, *type, {});
+						if (const auto self = weak_self.lock()) self->on_download_complete(token, url, *body, *type, {});
 					});
 				};
-				cb.on_error = [weak_self, url, token](std::string err)
+				cb.on_error = [weak_self, url, token](std::string error)
 				{
-					pf::run_ui([weak_self, url, token, err = std::move(err)]
+					platform::run_ui([weak_self, url, token, error = std::move(error)]
 					{
-						if (const auto self = weak_self.lock())
-							self->on_download_complete(token, url, {}, {}, err);
+						if (const auto self = weak_self.lock()) self->on_download_complete(token, url, {}, {}, error);
 					});
 				};
 
@@ -991,26 +1031,20 @@ namespace
 				return;
 			}
 
-			if (has_scheme(url))
-				show_error(url, "Cannot open this address", "Potato opens http, https and local files.");
-			else
-				show_error(url, "File not found", {});
+			if (has_scheme(url)) show_error(url, "Cannot open this address", "Potato opens http, https and local files.");
+			else show_error(url, "File not found", {});
 		}
 
-		void on_download_complete(const uint64_t token, const std::string& url,
-		                          const std::string& body, const std::string& content_type,
-		                          const std::string& error)
+		void on_download_complete(const uint64_t token, const std::string& url, const std::string& body,
+		                          const std::string& content_type, const std::string& error)
 		{
 			// Stale response (newer navigation issued).
 			if (token != _load_token) return;
 			_pending.reset();
-
-			if (!_content_reactor) return;
-
+			if (!_page) return;
 			if (!error.empty() || body.empty())
 			{
-				eval_log(std::format("Navigation failed: {}: {}", url,
-				                     error.empty() ? "empty response" : error));
+				eval_log(std::format("Navigation failed: {}: {}", url, error.empty() ? "empty response" : error));
 				show_error(url, "Failed to load", error.empty() ? std::string("(empty response)") : error);
 				return;
 			}
@@ -1019,11 +1053,66 @@ namespace
 			eval_log(std::format("Navigation downloaded: {} bytes: {}", body.size(), url));
 			const auto [doc_url, fragment] = split_fragment(url);
 			if (is_plain_text(content_type))
-				_content_reactor->load_html(doc_url, plain_text_page(body, content_type), "text/html; charset=utf-8",
-				                            fragment);
-			else
-				_content_reactor->load_html(doc_url, body, content_type, fragment);
+				_page->load_html(doc_url, plain_text_page(body, content_type), "text/html; charset=utf-8", fragment);
+			else _page->load_html(doc_url, body, content_type, fragment);
 			_eval_page_loaded = true;
+		}
+		// Shows a history entry. A fragment of the document already on screen
+		// only scrolls; anything else loads. Moving through history between
+		// entries of one document scrolls too, the way following its links did.
+		void show(const std::string& url, const bool traversal)
+		{
+			if (_address) _address->window_text(url);
+			const bool in_page = _page && _page->has_document() && !_pending &&
+				(traversal || url.find('#') != std::string::npos) && same_document(url, _current_url);
+			if (in_page)
+			{
+				_current_url = url;
+				_page->scroll_to_anchor(split_fragment(url).second);
+			}
+			else load(url);
+			update_buttons();
+		}
+
+		// Follows a link or opens a URL the browser itself chose. A link from a
+		// document arrives already resolved; resolving again is harmless.
+		void navigate(const std::string& url, const bool relative_to_page = true)
+		{
+			std::string target = url;
+			if (relative_to_page && !_current_url.empty())
+			{
+				auto resolved = platform::resolve_url(_current_url, url);
+				if (!resolved.empty()) target = std::move(resolved);
+			}
+			// Truncate forward history when navigating from the middle.
+			if (_history_pos + 1 < _history.size()) _history.resize(_history_pos + 1);
+			if (_history.empty() || _history.back() != target)
+			{
+				_history.push_back(target);
+				_history_pos = _history.size() - 1;
+			}
+			show(target, false);
+		}
+
+		// What the address bar hands over on Enter.
+		void navigate_typed(const std::string& text)
+		{
+			const auto url = typed_url(text, *this);
+			if (url.empty())
+			{
+				if (_address && !_history.empty()) _address->window_text(_history[_history_pos]);
+				return;
+			}
+			navigate(url, false);
+		}
+
+		// Loads the current entry again without touching the history around it.
+		void reload()
+		{
+			if (_history.empty()) return;
+			const auto url = _history[_history_pos];
+			if (_address) _address->window_text(url);
+			load(url);
 		}
 
 		void go_back()
@@ -1040,226 +1129,279 @@ namespace
 			show(_history[_history_pos], true);
 		}
 
-		void initialise(const pf::window_frame_ptr& main_frame)
+		void open_dropped_files(platform::clipboard_data& data)
 		{
-			if (_toolbar) return; // already built
-
-			// app_init runs before the window exists, so a caption set there is lost.
-			main_frame->set_text("Potato");
-
-			// ── Toolbar ──
-			pf::address_bar_config cfg;
-			cfg.style = pf::toolbar_style::address_bar;
-			cfg.initial_text = "about:blank";
-
-			cfg.left_buttons.push_back({
-				pf::icon_glyph::back, 1, "Back",
-				[this] { go_back(); },
-				[this] { return can_go_back(); }
-			});
-			cfg.left_buttons.push_back({
-				pf::icon_glyph::forward, 2, "Forward",
-				[this] { go_forward(); },
-				[this] { return can_go_forward(); }
-			});
-			cfg.left_buttons.push_back({
-				pf::icon_glyph::refresh, 3, "Refresh",
-				[this] { reload(); },
-				{}
-			});
-			cfg.left_buttons.push_back({
-				pf::icon_glyph::home, 4, "Home",
-				[this] { navigate("about:blank"); },
-				{}
-			});
-
-			cfg.right_buttons.push_back({
-				pf::icon_glyph::menu, 5, "Menu", {}, {}
-			});
-
-			cfg.on_navigate = [this](const std::string& text) { navigate_typed(text); };
-			cfg.on_suggest = [this](const std::string_view text) { return suggest(text); };
-
-			_toolbar = main_frame->create_address_bar(cfg);
-
-			// Attach a hamburger menu to the right-hand "menu" button.
-			// Browser-utility items only (no curated bookmarks).
-			std::vector<pf::menu_command> menu_items;
-			menu_items.emplace_back("Back", 0, [this] { go_back(); }, [this] { return can_go_back(); });
-			menu_items.emplace_back("Forward", 0, [this] { go_forward(); }, [this] { return can_go_forward(); });
-			menu_items.emplace_back("Reload", 0, [this] { reload(); });
-			menu_items.emplace_back(); // separator (empty text)
-			menu_items.emplace_back("Home", 0, [this] { navigate("about:blank"); });
-			menu_items.emplace_back("Test page", 0, [this] { navigate("res://test.htm"); });
-			menu_items.emplace_back("Open file...", 0, [this] { choose_local_file(); });
-			menu_items.emplace_back(); // separator
-			menu_items.emplace_back("Exit", 0, [main_frame] { main_frame->close(); });
-			_toolbar->set_menu(5, std::move(menu_items));
-
-			pf::menu_command file_menu;
-			file_menu.text = "File";
-			file_menu.children.emplace_back(
-				"Open...", 10001, [this] { choose_local_file(); }, nullptr, nullptr,
-				pf::key_binding{static_cast<unsigned int>('O'), pf::key_mod::ctrl});
-			file_menu.children.emplace_back();
-			file_menu.children.emplace_back("Exit", 10002, [main_frame] { main_frame->close(); });
-			main_frame->set_menu({std::move(file_menu)});
-
-			// ── Content ──
-			_content = main_frame->create_child("PotatoContent",
-			                                    pf::window_style::child |
-			                                    pf::window_style::visible |
-			                                    pf::window_style::clip_children,
-			                                    pf::color_t(255, 255, 255));
-			_content_reactor = std::make_shared<content_reactor>();
-			_content_reactor->set_frame(_content);
-			_content_reactor->set_on_open([this](const std::string& url) { navigate(url); });
-			_content_reactor->set_on_drop_files(
-				[this](const std::span<const pf::file_path> paths) { open_dropped_files(paths); });
-			_content_reactor->set_on_focus_address([this] { focus_address(); });
-			_content_reactor->set_on_diagnostic([this](const std::string& message)
+			if (data.has_drop_files())
 			{
-				eval_log(message);
-			});
-			_content_reactor->set_on_resource_started(
-				[this](const std::string& type, const std::string& url)
-				{
-					++_eval_pending_resources;
-					eval_log(std::format("{} request: {}", type, url));
-				});
-			_content_reactor->set_on_resource_finished(
-				[this](const std::string& type, const std::string& url, const bool success)
-				{
-					_eval_pending_resources = std::max(0, _eval_pending_resources - 1);
-					if (!success) ++_eval_failed_resources;
-					eval_log(std::format("{} {}: {}", type, success ? "loaded" : "failed", url));
-				});
-			_content->set_reactor(_content_reactor);
-			main_frame->accept_drop_files(true);
-			_content->accept_drop_files(true);
+				const auto path = data.first_path();
+				if (!path.is_empty()) open_local_file(path);
+			}
+		}
 
-			if (!_startup_url.empty())
+		void parse_options(const std::string_view command_line)
+		{
+			_options = {};
+			const auto tokens = command_line_tokens(command_line);
+			for (size_t i = 0; i < tokens.size(); ++i)
 			{
-				if (!_eval_url.empty())
+				const auto& p = tokens[i];
+				if (p == "/test" || p == "--test" || p == "-test")
 				{
-					eval_log(std::format("Evaluation started: {}", _eval_url));
-					main_frame->set_timer(k_eval_timer, 500);
+					_options.console = true;
+					_options.network_test = true;
 				}
-				// A URL on the command line is read the way the address bar reads it.
-				navigate_typed(_startup_url);
+				else if (p == "/test-offline" || p == "--test-offline" || p == "-test-offline")
+				{
+					_options.console = true;
+					_options.network_test = false;
+				}
+				else if (p.starts_with("/layout:") || p.starts_with("--layout:"))
+				{
+					_options.console = true;
+					_options.layout_path = p.substr(p.find(':') + 1);
+				}
+				else if (p == "--layout" && i + 1 < tokens.size())
+				{
+					_options.console = true;
+					_options.layout_path = tokens[++i];
+				}
+				else if (p == "--verbose" || p == "-v") _options.layout_verbose = true;
+				else if (p.starts_with("--width:")) _options.layout_width = safe_stoi(p.substr(p.find(':') + 1), 1902);
+				else if (p.starts_with("--repeat:")) _options.layout_repeats = safe_stoi(p.substr(p.find(':') + 1), 1);
+				else if (p == "--dump") _options.layout_dump = 64;
+				else if (p.starts_with("--dump:")) _options.layout_dump = safe_stoi(p.substr(p.find(':') + 1), 64);
+				else if (p == "--dump-json") _options.layout_dump_json = true;
+				else if (p.starts_with("/eval:") || p.starts_with("--eval:"))
+				{
+					_options.eval_url = p.substr(p.find(':') + 1);
+				}
+				else if (!p.starts_with('-') && !p.starts_with('/') && _options.startup_url.empty())
+					_options.startup_url = p;
 			}
-			else
-			{
-				navigate("res://test.htm");
-			}
+			if (!_options.layout_path.empty()) _options.console = true;
+		}
 
-			update_buttons();
+		void walk_elements(const ui::element_ptr& element, const core::pointi offset,
+		                   const std::function<void(const ui::element_ptr&, core::pointi)>& visit) const
+		{
+			if (!element) return;
+			visit(element, offset);
+			const auto child_offset = offset + element->children_offset();
+			element->visit_children([&](const ui::element_ptr& child) { walk_elements(child, child_offset, visit); });
 		}
 
 	public:
-		explicit main_frame_reactor(std::string startup_url = {}, const bool evaluate = false)
-			: _startup_url(std::move(startup_url)),
-			  _eval_url(evaluate ? _startup_url : std::string())
+		potato_app() = default;
+		~potato_app() override = default;
+
+		bool pre_init() override
 		{
-			_eval_started = std::chrono::steady_clock::now();
-			_eval_last_activity = _eval_started;
+			// libwebvis reaches the machine through this host, so it has to be in
+			// place before anything creates a document — including the CLI modes.
+			webvis::set_host(&g_host);
+			return true;
 		}
 
-		// Called from app_init — stash the frame so we can build children
-		// once it actually has an HWND.
-		void attach(pf::window_frame_ptr main_frame) { _main = std::move(main_frame); }
-
-		// ── pf::frame_reactor ─────────────────────────────────────────────
-		uint32_t handle_message(const pf::window_frame_ptr frame, const pf::message_type m,
-		                        const pf::message_params& params) override
+		bool parse_command_line(const std::string_view command_line) override
 		{
-			if (m == pf::message_type::create)
-			{
-				// HWND now exists — build the toolbar and content child.
-				initialise(frame ? frame : _main);
-				return 0;
-			}
-			if (m == pf::message_type::close)
-			{
-				if (frame) frame->close();
-				return 0;
-			}
-			// Windows gives the frame itself the focus whenever it is activated,
-			// and the frame has nothing to type into, so hand it to the page.
-			if (m == pf::message_type::set_focus)
-			{
-				if (_content) _content->set_focus();
-				return 0;
-			}
-			if (m == pf::message_type::drop_files)
-			{
-				open_dropped_files(params.dropped_paths);
-				return 0;
-			}
-			if (m == pf::message_type::timer && !_eval_url.empty())
-			{
-				const auto now = std::chrono::steady_clock::now();
-				const auto elapsed = now - _eval_started;
-				const auto quiet = now - _eval_last_activity;
-				if ((_eval_page_loaded && _eval_pending_resources == 0 &&
-					quiet >= std::chrono::seconds(5)) || elapsed >= std::chrono::seconds(60))
-				{
-					eval_log(std::format("Evaluation complete: pending={}, failed={}, timed_out={}",
-					                     _eval_pending_resources, _eval_failed_resources,
-					                     elapsed >= std::chrono::seconds(60)));
-					frame->kill_timer(k_eval_timer);
-					frame->close();
-				}
-				return 0;
-			}
-			if (m == pf::message_type::erase_background) return 1;
-			return 0;
+			parse_options(command_line);
+			return _options.console;
 		}
 
-	private:
-		pf::window_frame_ptr _main;
-
-		uint32_t handle_mouse(pf::window_frame_ptr, pf::mouse_message_type,
-		                      const pf::mouse_params&) override { return 0; }
-
-		uint32_t handle_keyboard(pf::window_frame_ptr, const pf::keyboard_message_type t,
-		                         const pf::keyboard_params& p) override
+		int run_console_mode() override
 		{
-			if (t == pf::keyboard_message_type::key_down && p.vk == pf::platform_key::F3)
+			if (!_options.layout_path.empty())
+				return run_layout(_options.layout_path, _options.layout_width, 896, _options.layout_repeats,
+			                          _options.layout_verbose, _options.layout_dump, _options.layout_dump_json);
+			return run_self_test(_options.network_test);
+		}
+
+		bool load_settings(const platform::setting_file_ptr& store) override
+		{
+			const auto running = platform::running_app_path().folder();
+			_settings = platform::create_ini_file_settings(running);
+			if (!_settings) _settings = store;
+			return _settings != nullptr;
+		}
+
+		bool wants_gpu() const override { return true; }
+
+		bool key_down(const char32_t key, const platform::key_state keys) override
+		{
+			if (key == platform::keys::F3)
 			{
 				focus_address();
-				return 1;
+				return true;
 			}
-			return 0;
+			if (_address && _address->has_focus()) return false;
+			if (ui::dispatch_accelerator(_menus, key, keys)) return true;
+			for (const auto& menu : _menus)
+				if (menu->menu && ui::dispatch_accelerator(menu->menu(), key, keys)) return true;
+			if (key == platform::keys::BROWSER_BACK) { go_back(); return true; }
+			if (key == platform::keys::BROWSER_FORWARD) { go_forward(); return true; }
+			if (key == platform::keys::BROWSER_REFRESH) { reload(); return true; }
+			if (key == platform::keys::BROWSER_HOME) { navigate("about:blank", false); return true; }
+			if (key == platform::keys::BROWSER_STOP || key == platform::keys::MEDIA_STOP)
+			{
+				if (_pending) { _pending->cancel(); _pending.reset(); }
+				return true;
+			}
+			return _page && _page->key_down(key, keys);
 		}
 
-		void handle_paint(pf::window_frame_ptr& frame, pf::draw_context& dc) override
+		bool text_input(std::string_view) override { return false; }
+
+		ui::focus_mode focus_mode() const override
 		{
-			// The toolbar and content children paint themselves; just clear
-			// any uncovered area as a backdrop.
-			if (frame)
-				dc.fill_solid_rect(frame->get_client_rect(), pf::color_t(240, 240, 240));
+			return _address && _address->has_focus() ? ui::focus_mode::text_edit : ui::focus_mode::view;
 		}
 
-		void handle_size(pf::window_frame_ptr& frame, const pf::isize extent,
-		                 pf::measure_context&) override
+		void track_menu(const ui::frame_ptr& parent, const core::recti bounds,
+		                const std::vector<ui::command_ptr>& commands) override
 		{
-			if (!frame) return;
-			const int toolbar_h = _toolbar ? _toolbar->preferred_height() : 0;
-
-			if (_toolbar && _toolbar->frame())
-				_toolbar->frame()->move_window(pf::irect(0, 0, extent.cx, toolbar_h));
-
-			if (_content)
-				_content->move_window(pf::irect(0, toolbar_h, extent.cx, extent.cy));
+			if (parent) parent->track_menu(bounds, commands);
 		}
+
+		bool can_exit() override { return true; }
+		bool init(const std::string_view command_line) override
+		{
+			parse_options(command_line);
+			webvis::set_host(&g_host);
+			g_host.open_network("potato/1.0");
+			_http = platform::create_async_http_session("potato/1.0");
+			_eval_url = _options.eval_url;
+			_eval_started = std::chrono::steady_clock::now();
+			_eval_last_activity = _eval_started;
+
+			build_ui();
+			ui::frame_style style;
+			style.drawn_caption = false;
+			style.hardware_accelerated = true;
+			style.client_size = {1200, 800};
+			style.minimum_client = {480, 240};
+			// Evaluation runs are automated, so keep their window off the desktop.
+			style.offscreen = !_eval_url.empty();
+			style.can_drop = true;
+			style.timer_milliseconds = _eval_url.empty() ? 0 : 500;
+			style.colors = {core::rgb(240, 240, 240), core::rgb(32, 32, 32), core::rgb(220, 230, 245)};
+
+			const auto self = shared_from_this();
+			_frame = ui::create_app_frame(std::static_pointer_cast<ui::app>(self), _settings,
+			                              std::static_pointer_cast<ui::frame_host>(self), style);
+			if (!_frame) return false;
+			_frame->window_text("Potato");
+			_page->set_callbacks([this] { if (_frame) _frame->invalidate(); },
+			                     [this](platform::cursor c) { if (_frame) _frame->set_cursor(c); });
+			_frame->layout();
+
+			if (!_options.eval_url.empty())
+			{
+				eval_log(std::format("Evaluation started: {}", _options.eval_url));
+				navigate_typed(_options.eval_url);
+			}
+			// A URL on the command line is read the way the address bar reads it.
+			else if (!_options.startup_url.empty()) navigate_typed(_options.startup_url);
+			else navigate("res://test.htm", false);
+			update_buttons();
+			return true;
+		}
+
+		void exit() override
+		{
+			if (_pending) { _pending->cancel(); _pending.reset(); }
+			if (_http) _http->stop();
+		}
+
+		void final_exit() override { g_host.stop_network(); }
+
+		void tick() override
+		{
+			if (_eval_url.empty() || !_frame) return;
+			const auto now = std::chrono::steady_clock::now();
+			const auto elapsed = now - _eval_started;
+			const auto quiet = now - _eval_last_activity;
+			if ((_eval_page_loaded && _eval_pending_resources == 0 && quiet >= std::chrono::seconds(5)) ||
+				elapsed >= std::chrono::seconds(60))
+			{
+				eval_log(std::format("Evaluation complete: pending={}, failed={}, timed_out={}", _eval_pending_resources,
+				                     _eval_failed_resources, elapsed >= std::chrono::seconds(60)));
+				_frame->close();
+			}
+		}
+
+		// ── frame_host ──
+		void on_window_layout(render::measure_context& mc, const core::sizei extent, bool) override
+		{
+			g_host.set_measure_context(&mc);
+			if (_root) _root->layout(mc, core::recti(extent));
+			g_host.set_measure_context(nullptr);
+		}
+
+		void on_window_paint(render::draw_context& dc) override
+		{
+			dc.clear(core::color(core::rgb(240, 240, 240)));
+			if (_root) _root->render(dc, {});
+		}
+
+		void visit_elements(const std::function<void(const ui::element_ptr&, core::pointi)>& visit) override
+		{
+			walk_elements(_root, {}, visit);
+		}
+
+		void focus_changed(const bool has_focus, const ui::control_ptr& child) override
+		{
+			if (!has_focus && child == _address && _address)
+				_address->window_text(_current_url.empty() && !_history.empty() ? _history[_history_pos] : _current_url);
+		}
+		void on_mouse_move(const core::pointi loc, bool) override { if (_page) _page->pointer_move(loc); }
+		void on_mouse_left_button_down(const core::pointi loc, const platform::key_state keys) override
+		{
+			if (_frame) _frame->focus();
+			if (_page) _page->pointer_down(loc, keys);
+		}
+		void on_mouse_left_button_up(const core::pointi loc, const platform::key_state keys) override
+		{
+			if (_page) _page->pointer_up(loc, keys);
+		}
+		void on_mouse_leave(const core::pointi) override { if (_page) _page->pointer_leave(); }
+		void on_mouse_wheel(const core::pointi loc, const int delta, const platform::key_state, bool& was_handled) override
+		{
+			if (_page) was_handled = _page->wheel_at(loc, delta);
+		}
+		bool key_down(const int key, const platform::key_state keys) override
+		{
+			return _page && _page->key_down(static_cast<char32_t>(key), keys);
+		}
+		platform::drop_effect drag_over(const platform::clipboard_data& data, const platform::key_state,
+		                                const core::pointi) override
+		{
+			return data.has_drop_files() ? platform::drop_effect::copy : platform::drop_effect::none;
+		}
+		platform::drop_effect drag_drop(platform::clipboard_data& data, const platform::key_state,
+	                                const core::pointi) override
+		{
+			open_dropped_files(data);
+			return data.has_drop_files() ? platform::drop_effect::copy : platform::drop_effect::none;
+		}
+		void drag_leave() override {}
 	};
-}
 
-// ── App entry points ──────────────────────────────────────────────────────
+	void register_chrome_icons()
+	{
+		render::set_icon_font_family("Segoe Fluent Icons");
+		ui::set_chrome_icons({
+			.check = icon_index::check,
+			.checkbox_off = icon_index::checkbox_off,
+			.checkbox_on = icon_index::checkbox_on,
+			.radio_off = icon_index::radio_off,
+			.radio_on = icon_index::radio_on,
+			.close = icon_index::close,
+			.maximize = icon_index::maximize,
+			.minimize = icon_index::minimize,
+			.restore = icon_index::restore,
+		});
+	}
 
-namespace
-{
 	// The browser's own cases, run in the same table as the engine's
 	// (webvis::run_tests) by the self-test.
 	void register_shell_tests(webvis::tests& t)
@@ -1297,6 +1439,22 @@ namespace
 			should::equal("Segoe UI", windows_face("Segoe UI"), "a face is kept");
 		});
 
+		t.register_test("Shell: command-line paths preserve backslashes", []
+		{
+			const auto tokens = command_line_tokens(R"("--layout:C:\code\apps\potato\src\potato\res\test.htm" "C:\My Pages\a.html")");
+			should::EqualTrue(tokens.size() == 2, "two quoted arguments");
+			should::equal(std::string(R"(--layout:C:\code\apps\potato\src\potato\res\test.htm)"), tokens[0], "switch path");
+			should::equal(std::string(R"(C:\My Pages\a.html)"), tokens[1], "file path");
+		});
+		t.register_test("Shell: text measurement counts spaces", []
+		{
+			webvis::font_desc desc;
+			desc.face = "Arial";
+			desc.size = 16;
+			const auto font = g_host.create_font(desc, nullptr);
+			should::EqualTrue(g_host.text_width(font, " ") > 0, "a space has width");
+			g_host.destroy_font(font);
+		});
 		// text/plain used to be parsed as HTML: <b> turned bold and lines ran together.
 		t.register_test("Shell: plain text is shown, not parsed", []
 		{
@@ -1304,7 +1462,6 @@ namespace
 			should::equal(true, is_plain_text(" Text/Plain "), "case and spaces");
 			should::equal(false, is_plain_text("text/html"), "html");
 			should::equal(false, is_plain_text(""), "no type");
-
 			const auto page = plain_text_page("a <b>c</b>\n\xE9", "text/plain; charset=iso-8859-1");
 			should::EqualTrue(page.find("a &lt;b&gt;c&lt;/b&gt;\n\xC3\xA9") != std::string::npos,
 			                  "escaped, decoded, line break kept");
@@ -1320,13 +1477,12 @@ namespace
 			scratch->write(reinterpret_cast<const uint8_t*>(body.data()), body.size());
 			scratch->close();
 			const auto path = scratch->path();
-			should::equal(body, get_file_contents(path), "readable once closed");
-
-			auto reader = scratch; // the completion's copy
+			// the completion's copy
+			auto reader = scratch;
 			scratch.reset();
-			should::EqualTrue(pf::file_path(path).exists(), "kept while the completion holds it");
+			should::EqualTrue(platform::exists(path), "kept while the completion holds it");
 			reader.reset();
-			should::EqualTrue(!pf::file_path(path).exists(), "deleted by the last owner");
+			should::EqualTrue(!platform::exists(path), "deleted by the last owner");
 		});
 
 		t.register_test("Shell: an abandoned scratch file goes at once, and only once", []
@@ -1334,21 +1490,20 @@ namespace
 			auto scratch = scratch_file::create("pts");
 			should::EqualTrue(scratch != nullptr, "created");
 			const auto path = scratch->path();
-
 			scratch->discard();
-			should::EqualTrue(!pf::file_path(path).exists(), "discard deletes");
+			should::EqualTrue(!platform::exists(path), "discard deletes");
 			const std::string late = "late";
 			scratch->write(reinterpret_cast<const uint8_t*>(late.data()), late.size());
-			should::EqualTrue(!pf::file_path(path).exists(), "a late write is dropped");
-
+			should::EqualTrue(!platform::exists(path), "a late write is dropped");
 			// The system may hand the freed name to the next download.
-			should::EqualTrue(pf::open_file_for_write(pf::file_path(path)) != nullptr, "name reused");
+			should::EqualTrue(platform::open_file(path, platform::file_open_mode::create) != nullptr, "name reused");
 			scratch.reset();
-			const bool survived = pf::file_path(path).exists();
-			pf::platform_delete_file(pf::file_path(path));
+			const bool survived = platform::exists(path);
+			platform::delete_file(path);
 			should::EqualTrue(survived, "the old owner leaves the reused name alone");
 		});
 	}
+
 	// Headless layout of a local HTML file. No window and no message loop, so
 	// no async resource can ever land and the result is repeatable. Prints
 	// "<file>: <w>x<h>" plus stage timings, structure and layout anomalies.
@@ -1356,53 +1511,41 @@ namespace
 	               const bool verbose, const int dump_depth, const bool dump_json)
 	{
 		const auto html = get_file_contents(path);
-
 		if (html.empty())
 		{
-			pf::write_stdout(std::format("Layout: cannot read {}\n", path));
+			platform::write_stdout(std::format("Layout: cannot read {}\n", path));
 			return 11;
 		}
 
 		layout_result r;
-
 		for (auto i = 0; i < std::max(1, repeats); ++i)
 		{
 			r = layout_html_headless(html, width, height, dump_json ? false : verbose, dump_depth, dump_json);
 			if (!dump_json)
-				pf::write_stdout(std::format("{}: {}x{} (parse+style {} us, layout {} us)\n",
-				                             path, r.width, r.height, r.parse_style_us, r.layout_us));
+				platform::write_stdout(std::format("{}: {}x{} (parse+style {} us, layout {} us)\n", path, r.width, r.height,
+				                                   r.parse_style_us, r.layout_us));
 		}
 
 		if (dump_json)
 		{
-			pf::write_stdout(r.layout_json + "\n");
+			platform::write_stdout(r.layout_json + "\n");
 			return r.height > 0 ? 0 : 12;
 		}
-
 		const auto& s = r.stats;
-		pf::write_stdout(std::format(
-			"  nodes: {} elements, {} text, {} images, depth {}; right edge {}, {} hidden subtrees\n",
-			s.elements, s.text_nodes, s.images, s.max_depth, s.right_edge, s.hidden_subtrees));
+		platform::write_stdout(std::format("  nodes: {} elements, {} text, {} images, depth {}; right edge {}, {} hidden subtrees\n",
+		                                   s.elements, s.text_nodes, s.images, s.max_depth, s.right_edge, s.hidden_subtrees));
 		const auto anomalies = s.overflow_x + s.negative_x + s.zero_area_text + s.unsized_image + s.negative_size;
-
 		if (anomalies)
 		{
-			pf::write_stdout(std::format(
+			platform::write_stdout(std::format(
 				"  anomalies: {} overflow-x, {} negative-x, {} zero-height-text, {} unsized-image, {} negative-size\n",
 				s.overflow_x, s.negative_x, s.zero_area_text, s.unsized_image, s.negative_size));
-
-			for (const auto& a : r.anomalies) pf::write_stdout("    " + a + "\n");
+			for (const auto& a : r.anomalies) platform::write_stdout("    " + a + "\n");
 		}
-		else
-		{
-			pf::write_stdout("  anomalies: none\n");
-		}
-
-		for (const auto& line : r.box_dump) pf::write_stdout(line + "\n");
-
+		else platform::write_stdout("  anomalies: none\n");
+		for (const auto& line : r.box_dump) platform::write_stdout(line + "\n");
 		return r.height > 0 ? 0 : 12;
 	}
-
 	// Combined self-test:
 	//   1. Runs the in-process unit tests (run_tests() from core.cpp, plus the
 	//      browser's own from register_shell_tests) and
@@ -1413,35 +1556,26 @@ namespace
 	int run_self_test(const bool network)
 	{
 		int result = 0;
-
 		// 1. Unit tests
-		pf::write_stdout("Potato self-test: running unit tests ...\n");
+		platform::write_stdout("Potato self-test: running unit tests ...\n");
 		const auto report = run_tests(register_shell_tests);
-		const auto report_path = pf::platform_temp_file_path("potato_tests_");
-		if (const auto out = pf::open_file_for_write(pf::file_path{report_path}))
+		const auto report_path = platform::temp_file(".tmp");
+		if (const auto out = platform::open_file(report_path, platform::file_open_mode::create))
 		{
-			out->write(reinterpret_cast<const uint8_t*>(report.data()),
-			           static_cast<uint32_t>(report.size()));
+			out->write(reinterpret_cast<const uint8_t*>(report.data()), report.size());
+			out->flush();
 		}
 		const bool unit_failed = report.find("FAILED") != std::string::npos;
-		pf::write_stdout(std::format(
-			"Unit tests: {} (report: {})\n",
-			unit_failed ? "FAIL" : "PASS", report_path));
+		platform::write_stdout(std::format("Unit tests: {} (report: {})\n", unit_failed ? "FAIL" : "PASS", report_path.str()));
 		if (unit_failed) result = 10;
 
-		// 2. Network fetch — exercise the same async HTTP path the browser
-		//    uses to load pages, stylesheets and images. We block the calling
-		//    thread on a condition variable; callbacks fire on a background
-		//    thread (see win_async_http_request::s_callback) so this is safe
-		//    without a UI message pump.
 		const auto fetch = [](const std::string_view url) -> int
 		{
-			pf::write_stdout(std::format("Potato self-test: fetching {} ...\n", url));
-
-			const auto session = pf::create_async_http_session("Potato/1.0-test");
+			platform::write_stdout(std::format("Potato self-test: fetching {} ...\n", url));
+			const auto session = platform::create_async_http_session("Potato/1.0-test");
 			if (!session)
 			{
-				pf::write_stdout("FAIL: create_async_http_session returned null\n");
+				platform::write_stdout("FAIL: create_async_http_session returned null\n");
 				return 1;
 			}
 
@@ -1453,9 +1587,8 @@ namespace
 			std::string error;
 			size_t body_bytes = 0;
 			std::string body_preview;
-
-			pf::async_http_callbacks cb;
-			cb.on_headers = [&](const int sc, std::string ct, uint64_t /*len*/)
+			platform::async_http_callbacks cb;
+			cb.on_headers = [&](const int sc, std::string ct, uint64_t)
 			{
 				std::lock_guard lk(mtx);
 				status_code = sc;
@@ -1471,7 +1604,7 @@ namespace
 					body_preview.append(reinterpret_cast<const char*>(data), take);
 				}
 			};
-			cb.on_complete = [&]()
+			cb.on_complete = [&]
 			{
 				std::lock_guard lk(mtx);
 				done = true;
@@ -1488,185 +1621,60 @@ namespace
 			const auto req = session->get(url, cb);
 			if (!req)
 			{
-				pf::write_stdout("FAIL: session->get returned null\n");
+				platform::write_stdout("FAIL: session->get returned null\n");
 				return 2;
 			}
-
 			std::unique_lock lk(mtx);
 			if (!cv.wait_for(lk, std::chrono::seconds(30), [&] { return done; }))
 			{
-				pf::write_stdout("FAIL: request timed out after 30 seconds\n");
+				platform::write_stdout("FAIL: request timed out after 30 seconds\n");
 				req->cancel();
 				return 3;
 			}
-
-			pf::write_stdout(std::format(
-				"  HTTP status: {}, content-type: {}, body: {} bytes\n",
-				status_code, content_type, body_bytes));
-
+			platform::write_stdout(std::format("  HTTP status: {}, content-type: {}, body: {} bytes\n", status_code, content_type,
+			                                   body_bytes));
 			if (!body_preview.empty())
 			{
 				// Replace control chars for stdout safety; show full preview.
 				std::string preview;
-				preview.reserve(body_preview.size());
-				for (const auto c : body_preview)
-					preview.push_back((c == '\r' || c == '\n' || c == '\t') ? ' ' : c);
-				pf::write_stdout(std::format("  body preview: {}\n", preview));
+				for (const auto c : body_preview) preview.push_back((c == '\r' || c == '\n' || c == '\t') ? ' ' : c);
+				platform::write_stdout(std::format("  body preview: {}\n", preview));
 			}
-
-			if (!error.empty())
-			{
-				pf::write_stdout(std::format("FAIL: {}\n", error));
-				return 4;
-			}
-			if (status_code < 200 || status_code >= 400)
-			{
-				pf::write_stdout("FAIL: unexpected HTTP status code\n");
-				return 5;
-			}
-			if (body_bytes == 0)
-			{
-				pf::write_stdout("FAIL: empty response body\n");
-				return 6;
-			}
-
-			pf::write_stdout("  PASS\n");
+			if (!error.empty()) { platform::write_stdout(std::format("FAIL: {}\n", error)); return 4; }
+			if (status_code < 200 || status_code >= 400) { platform::write_stdout("FAIL: unexpected HTTP status code\n"); return 5; }
+			if (body_bytes == 0) { platform::write_stdout("FAIL: empty response body\n"); return 6; }
+			platform::write_stdout("  PASS\n");
 			return 0;
 		};
 
 		if (!network)
 		{
-			pf::write_stdout("Network checks skipped (offline self-test).\n");
+			platform::write_stdout("Network checks skipped (offline self-test).\n");
 			return result;
 		}
-
-		for (const auto url : {
-			     "http://example.com/",
-			     "https://example.com/",
-			     "https://www.google.com/",
-			     "https://en.wikipedia.org/wiki/Main_Page",
-		     })
+		for (const auto url : {"http://example.com/", "https://example.com/", "https://www.google.com/",
+		                       "https://en.wikipedia.org/wiki/Main_Page"})
 		{
 			const auto rc = fetch(url);
 			if (rc != 0 && result == 0) result = rc;
 		}
-
 		return result;
 	}
 }
 
-app_init_result app_init(const pf::window_frame_ptr& main_frame,
-                         const std::span<const std::string_view> params)
+// ── App entry points ──────────────────────────────────────────────────────
+int main(int argc, char** argv)
 {
-	app_init_result r;
-	r.start_gui = true;
-	r.exit_code = 0;
-
-	// libwebvis reaches the machine through this host, so it has to be in
-	// place before anything creates a document — including the CLI modes.
-	// Only the window opens the network: without it every resource request
-	// fails at once, which keeps --layout and the self-test offline, instead
-	// of fetching images whose results can never land and whose scratch files
-	// were left behind in %TEMP%.
+	core::set_app_name("Potato");
+	register_chrome_icons();
 	webvis::set_host(&g_host);
-
-	std::string eval_url;
-	std::string startup_url;
-	std::string layout_path;
-	int layout_width = 1902;
-	int layout_repeats = 1;
-	bool layout_verbose = false;
-	int layout_dump = 0;
-	bool layout_dump_json = false;
-
-	for (const auto& p : params)
-	{
-		if (p == "/test" || p == "--test" || p == "-test")
-		{
-			r.start_gui = false;
-			r.exit_code = run_self_test(true);
-			return r;
-		}
-		if (p == "/test-offline" || p == "--test-offline" || p == "-test-offline")
-		{
-			r.start_gui = false;
-			r.exit_code = run_self_test(false);
-			return r;
-		}
-		if (p.starts_with("/layout:") || p.starts_with("--layout:"))
-		{
-			layout_path = p.substr(p.find(':') + 1);
-		}
-		else if (p == "--verbose" || p == "-v")
-		{
-			layout_verbose = true;
-		}
-		else if (p.starts_with("--width:"))
-		{
-			layout_width = safe_stoi(std::string(p.substr(p.find(':') + 1)), layout_width);
-		}
-		else if (p.starts_with("--repeat:"))
-		{
-			layout_repeats = safe_stoi(std::string(p.substr(p.find(':') + 1)), 1);
-		}
-		else if (p == "--dump")
-		{
-			layout_dump = 64;
-		}
-		else if (p.starts_with("--dump:"))
-		{
-			layout_dump = safe_stoi(std::string(p.substr(p.find(':') + 1)), 64);
-		}
-		else if (p == "--dump-json")
-		{
-			layout_dump_json = true;
-		}
-		else if (p.starts_with("/eval:") || p.starts_with("--eval:"))
-		{
-			const auto separator = p.find(':');
-			eval_url = p.substr(separator + 1);
-		}
-		else if (!p.starts_with("-") && !p.starts_with("/") && startup_url.empty())
-		{
-			startup_url = p;
-		}
-	}
-
-	if (!layout_path.empty())
-	{
-		r.start_gui = false;
-		r.exit_code = run_layout(layout_path, layout_width, 896, layout_repeats, layout_verbose, layout_dump,
-		                         layout_dump_json);
-		return r;
-	}
-
-	if (main_frame)
-	{
-		g_host.open_network("potato/1.0");
-
-		// Evaluation runs are automated, so keep their window off the desktop.
-		r.offscreen_gui = !eval_url.empty();
-		if (!eval_url.empty()) startup_url = eval_url;
-		const auto reactor = std::make_shared<main_frame_reactor>(std::move(startup_url), !eval_url.empty());
-		reactor->attach(main_frame);
-		main_frame->set_reactor(reactor);
-	}
-
-	return r;
+	auto app = std::make_shared<potato_app>();
+	return platform::run(app, argc, argv);
 }
 
-void app_idle()
-{
-}
-
-void app_destroy()
-{
-	g_host.stop_network();
-}
-
-// Portable UI dispatch entry point declared in core.h. Forwards to the
+// Portable UI dispatch entry point declared in webvis.h. Forwards to the
 // platform layer's task queue.
 void webvis::dispatch_to_ui(std::function<void()> fn)
 {
-	pf::run_ui(std::move(fn));
+	platform::run_ui(std::move(fn));
 }

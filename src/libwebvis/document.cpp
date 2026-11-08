@@ -1081,15 +1081,15 @@ void register_layout_tests(tests& t)
 
 	t.register_test("Layout: wikipedia main page", []
 	{
-		should_lay_out_fixture("wikipedia-main-page.html", 1902, 14921);
+		should_lay_out_fixture("wikipedia-main-page.html", 1902, 14859);
 	});
 	t.register_test("Layout: wikipedia web browser", []
 	{
-		should_lay_out_fixture("wikipedia-web-browser.html", 2065, 15126);
+		should_lay_out_fixture("wikipedia-web-browser.html", 2067, 15101);
 	});
 	t.register_test("Layout: wikipedia comparison table", []
 	{
-		should_lay_out_fixture("wikipedia-comparison-of-web-browsers.html", 2065, 35735);
+		should_lay_out_fixture("wikipedia-comparison-of-web-browsers.html", 2067, 35535);
 	});
 	t.register_test("Layout: bbc news", []
 	{

@@ -31,14 +31,12 @@
 
 Found by hand-testing the window (2026-10-09 and 2026-10-10); none is a crash.
 
-- **No Alt+Left / Alt+Right for history.** libdesktop does not deliver Alt key
-  combinations to the reactor (its README's known gaps); once it does, bind them.
+- **No Alt+Left / Alt+Right for history.** The browser does not bind these
+  accelerators yet; add them to its command table without taking them from the
+  File menu's Alt handling.
 - **The suggestions shown on focus list only the current URL.** They are
   filtered by the whole URL the address bar holds when it takes focus; history
   and bookmarks appear once that text is cleared or edited.
-- **Transparent images draw black where they are transparent.** libdesktop's
-  `draw_context::draw_bitmap` is an opaque blit, so PNG alpha is ignored; it
-  needs an alpha-blending draw in libdesktop first.
 - **After a redirect the address bar keeps the URL that was asked for**, and
   relative links resolve against it: the async HTTP API reports no final URL.
 - **Only HTML and plain text are displayable.** Any other type — an image, a

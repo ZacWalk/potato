@@ -18,19 +18,17 @@ The repository holds two targets:
 - **HTML parsing**: A tokenizer (`scanner`) feeds an HTML parser (`parser`) that builds a DOM tree of `element` nodes owned by a `document`.
 - **CSS engine**: Stylesheets are parsed into selectors (`css`) and property maps (`style`). CSS values use `css_length` with `calc()` support. Media queries filter rules by screen type.
 - **Layout**: Elements compute their box model (margins, padding, borders) and position children using block/inline flow (`box`). Tables have dedicated grid layout (`table_grid`). Layout is independent of any drawing surface — `document::render(max_width)` takes no renderer and needs no window, so it can run headless. Only `document::draw` requires a `renderer`.
-- **Rendering**: `renderer` draws text, backgrounds, borders and images through `webvis::device_context`, which potato implements over `pf::draw_context`.
+- **Rendering**: `renderer` draws text, backgrounds, borders and images through `webvis::device_context`, which potato implements over `render::draw_context`.
 - **Networking**: libwebvis never opens a socket. It asks for a URL through
   `webvis::host::load_resource` and is handed back either text or a decoded
-  image. Potato backs that with an async WinHTTP client that downloads to a
-  temp file and marshals the completion to the UI thread with `pf::run_ui`;
+  image. Potato backs that with libdesktop asynchronous HTTP services that download to a
+  temp file and marshals the completion to the UI thread with `platform::run_ui`;
   the resources of a page opened from disk are read straight from disk, still
   completing on the UI thread.
-- **UI**: `main.cpp` builds the frame: `content_reactor` hosts the rendered document with scrolling (wheel, scrollbar, and the arrow, Page, Space, Home and End keys once the page has focus), and `main_frame_reactor` owns the toolbar, address bar, menu and navigation history. Text typed into the address bar is read as a URL, a local path or a bare host name (`example.com` opens `https://example.com`); a link to a fragment of the page on screen scrolls rather than reloads. A `text/plain` response or a local `.txt` file is shown as text, not parsed as markup.
-- **Platform layer**: the `pf::` surface (windows, drawing, fonts, files, HTTP)
-  lives in the separate **libdesktop** repository (formerly platform-h), shared
-  with the other apps in this workspace. CMake pulls it in with `FetchContent`,
-  building against a sibling `../libdesktop` checkout when one exists. Only the
-  **potato** target links it.
+- **UI**: `main.cpp` builds a `ui::app` whose frame host owns an element tree: a drawn navigation toolbar, URL `ui::edit`, File menu bar and a page element with scrolling. Text typed into the address bar is read as a URL, a local path or a bare host name (`example.com` opens `https://example.com`); a link to a fragment of the page on screen scrolls rather than reloads. A `text/plain` response or a local `.txt` file is shown as text, not parsed as markup.
+- **Platform layer**: the four libdesktop libraries provide core values, platform services,
+  render contexts and the drawn UI. CMake pulls libdesktop in with `FetchContent`, building
+  against a sibling `../libdesktop` checkout when one exists. Only the **potato** target links it.
 
 ## The libwebvis boundary
 
@@ -52,8 +50,8 @@ platform task queue.
 
 Two rules keep the split honest:
 
-- `src/libwebvis` must contain no `pf::`, no `platform.h` and no Windows SDK
-  header. Grep for `pf::` there; the answer must stay empty.
+- `src/libwebvis` must contain no libdesktop include and no Windows SDK header. Keep all
+  machine access behind `webvis::host` and `webvis::device_context`; the engine stays portable.
 - The user-agent stylesheet is compiled *into* the library from
   `src/libwebvis/res/master.css` by `cmake/embed_master_css.cmake`, so a
   consumer needs no data file alongside it.
@@ -65,7 +63,7 @@ using-directive; other consumers should qualify instead.
 
 ```
 CMakeLists.txt       — Build definition (MSVC + Ninja). Declares the webvis
-                       static library and the potato app. platform_add_app()
+                       static library and the potato app. libdesktop_add_app()
                        generates the icon, manifest, version info and embedded
                        res/ files, so there is no .rc and no resource.h
 CMakePresets.json    — `debug` and `release` configure/build presets
@@ -104,14 +102,14 @@ src/libwebvis/       — The engine. No platform dependency.
     └── master.css   — Default user-agent stylesheet (compiled into the lib)
 
 src/potato/          — The browser. Implements what libwebvis asks for.
-├── pch.h            — Precompiled header: STL, platform.h and webvis.h.
+├── pch.h            — Precompiled header: STL, libdesktop/ui.h and webvis.h.
 │                      Contains NO Windows SDK headers by design
 ├── targetver.h      — Windows SDK version targeting
 ├── webvis_host.h    — potato_device_context, potato_host, potato_image
-├── webvis_host.cpp  — GDI fonts, WIC image decoding, the async WinHTTP
-│                      client, the SVG placeholder, screen metrics
-├── main.cpp         — app_init, the browser frame and content view, the CLI
-│                      modes (--test, --layout, --eval) and dispatch_to_ui
+├── webvis_host.cpp  — libdesktop fonts and image decoding, the async platform
+│                      HTTP client, the SVG placeholder, screen metrics
+├── main.cpp         — the ui::app, frame host, element tree and content view;
+│                      CLI modes (--test, --layout, --eval) and dispatch_to_ui
 └── res/
     ├── potato.ico   — Application icon (embedded via ICON)
     └── test.htm     — Built-in test page (embedded via EMBED)
@@ -157,7 +155,7 @@ project's command list. Upstream dd owns the documentation for
 [CLI and MCP mode](https://github.com/ZacWalk/dd/blob/main/docs/mcp.md#two-modes)
 and for [built-in commands](https://github.com/ZacWalk/dd/blob/main/docs/cli.md#commands).
 
-Project commands ported from the pre-dd driver; both declare `effects = 'read'`:
+Project commands declare `effects = 'read'`:
 
 ```pwsh
 .\dd.ps1 layout --file test-files/wikipedia-main-page.html --width 1200
@@ -212,7 +210,7 @@ basis for judging a layout change. `-v`/`--verbose` adds `view_host::diagnostic`
 and `resource_finished`; without it the headless view swallows all of them,
 because the base `view_host` methods are empty.
 
-Headless is offline. `app_init` opens the HTTP session only when it starts the
+Headless is offline. `potato_app::init` opens the HTTP session only when it starts the
 window, so in `--layout:` and the self-test every external stylesheet or image
 request fails at once: nothing is fetched, no `%TEMP%\pot*` scratch file is left
 behind, and timings no longer depend on the network. (The live checks of
@@ -272,17 +270,17 @@ instances for you; when driving CMake directly, do it yourself:
 
 ## Threading model
 
-One thread of our own, plus whatever WinHTTP uses internally:
+One thread of our own, plus whatever libdesktop asynchronous HTTP services use internally:
 
 - **UI thread** — all DOM, style, layout and painting. Runs the message loop in
-  `pf::platform_run`, draining `ui_tasks` whenever `ui_event_h` signals.
-- **WinHTTP pool threads** — invoke the async HTTP callbacks. They never touch
-  the DOM; every result is handed to the UI thread with `pf::run_ui`, which
+  `platform::run`, with `platform::run_ui` tasks drained by the UI loop.
+- **Platform HTTP worker threads** — invoke the async HTTP callbacks. They never touch
+  the DOM; every result is handed to the UI thread with `platform::run_ui`, which
   always queues, never runs the task inline and never waits for it.
 
 Locks exist, but every one is a short leaf-level guard around a container
 (`cs_ui`, the HTTP client's request list, `document::m_fonts_mutex`, the
-WinHTTP request mutexes). The invariant to preserve:
+platform HTTP request mutexes). The invariant to preserve:
 
 > No lock is ever held across a callout, a queued task, or another lock.
 
@@ -304,7 +302,7 @@ intuition is not a guide.
 
 - **Naming**: `lowercase_separated_by_underscores` for all identifiers — classes, functions, methods, variables, enum values. Member variables use `m_` prefix, private members use `_` prefix.
 - **File headers**: Every source file begins with a `//` comment describing its purpose.
-- **UTF-8 `std::string` everywhere.** `std::wstring` exists only inside the platform layer and the `pf::utf8_to_utf16` / `utf16_to_utf8` helpers, which convert at the Windows SDK boundary. Never let `wchar_t` leak into the engine.
+- **UTF-8 `std::string` everywhere.** `std::wstring` exists only inside the platform layer and the platform text services, which convert at the Windows SDK boundary. Never let `wchar_t` leak into the engine.
 - Case-insensitive vocabulary comparison via the portable ASCII `is_equal` / `icmp` / `nicmp` helpers and the `ltstr` / `ltstr_sv` container comparators. Do not use locale-dependent CRT comparisons for CSS or HTML keywords.
 - CSS keyword sets are semicolon-delimited string tables (e.g. `border_style_strings`) searched by `value_index`; `prop_id` / `prop_id_strings` do the same for property names, and anything absent from that table is discarded at parse time.
 - Custom CSS properties use the `-potato-` vendor prefix.
@@ -312,7 +310,7 @@ intuition is not a guide.
 - `POTATO_BUILD_APP=OFF` builds libwebvis and its portable checks without fetching libdesktop; this is an engine build, not a non-Windows browser.
 - **libwebvis stays platform-free.** If the engine needs something from the
   machine, add it to `webvis::host` or `webvis::device_context` and implement it
-  in `src/potato/webvis_host.cpp` — never reach for `pf::` from `src/libwebvis`.
+  in `src/potato/webvis_host.cpp` — never include libdesktop from `src/libwebvis`.
 
 ### Splitting CSS text
 

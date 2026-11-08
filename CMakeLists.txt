@@ -34,7 +34,7 @@ endif()
 include(FetchContent)
 FetchContent_Declare(libdesktop
     GIT_REPOSITORY https://github.com/ZacWalk/libdesktop.git
-    GIT_TAG        31aae322af6e0696a9597726705b1121bd31580b
+    GIT_TAG        04109ee82a500db38d439fa281bbc3f43124adfe
 )
 FetchContent_MakeAvailable(libdesktop)
 endif()
@@ -85,7 +85,7 @@ set_target_properties(webvis PROPERTIES
 # implementations of the libwebvis device_context and host interfaces.
 
 if(POTATO_BUILD_APP)
-platform_add_app(potato
+libdesktop_add_app(potato
     SOURCES
         src/potato/main.cpp
         src/potato/webvis_host.cpp
@@ -98,7 +98,7 @@ platform_add_app(potato
 
 target_include_directories(potato PRIVATE src/potato)
 
-target_link_libraries(potato PRIVATE webvis::webvis)
+target_link_libraries(potato PRIVATE webvis::webvis libdesktop::ui)
 
 target_compile_definitions(potato PRIVATE _WINSOCK_DEPRECATED_NO_WARNINGS)
 

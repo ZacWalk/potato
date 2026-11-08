@@ -2,8 +2,8 @@
 
 [![Build](https://github.com/ZacWalk/potato/actions/workflows/build.yml/badge.svg)](https://github.com/ZacWalk/potato/actions/workflows/build.yml)
 
-A web browser written from scratch in C++20 for Windows. No dependencies, simple
-Win32 GDI rendering, some CSS but no JavaScript.
+A web browser written from scratch in C++20 for Windows. It uses libdesktop's
+core, platform, render and ui libraries for its host, with some CSS but no JavaScript.
 
 Back in the 2000s, I needed to move from C++ to work on a Web project. I wanted to learn CSS better, so I decided the best thing to do, was write my own Web Browser in C++.
 
@@ -23,7 +23,7 @@ reusable engine and the browser that drives it:
   queries, `calc()` and custom properties; and block, inline, float, flex and
   table layout.
 - **`src/potato`** — the browser: window, toolbar, address bar, navigation
-  history, GDI/WIC painting and asynchronous loading over WinHTTP.
+  history, libdesktop render painting and asynchronous loading through platform HTTP services.
 
 libwebvis has no platform dependency at all — it does not even link
 [libdesktop](https://github.com/ZacWalk/libdesktop). Everything it needs from the
@@ -61,7 +61,7 @@ ctest --test-dir build\engine -L webvis --output-on-failure
 ```
 
 CSS vocabulary comparisons use ASCII case folding, independently of the
-machine's locale. The browser still requires libdesktop's Windows GUI backend.
+machine's locale. The browser host uses libdesktop's Windows platform and UI backends.
 
 ## Diagnostics
 
