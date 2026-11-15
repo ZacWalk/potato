@@ -50,6 +50,24 @@ int main()
 	check(!dispatched && ui_tasks.size() == 1, "host dispatch queues rather than running inline");
 	for (const auto& task : ui_tasks) task();
 	check(dispatched, "queued work runs on the host thread");
+	webvis::tests passing;
+	passing.register_test("passing case", [] {});
+	const auto pass_report = passing.run_tests();
+	check(pass_report.success() && pass_report.passed == 1 && pass_report.failed == 0,
+	      "test reports count executed cases");
+	check(pass_report.text.find("PASS  passing case") != std::string::npos &&
+	          pass_report.html.find("passing case") != std::string::npos,
+	      "console and HTML reports name the same case");
+	webvis::tests failing;
+	failing.register_test("failing case", [] { throw std::string("failure detail"); });
+	const auto fail_report = failing.run_tests();
+	check(!fail_report.success() && fail_report.passed == 0 && fail_report.failed == 1 &&
+	          fail_report.text.find("FAIL  failing case: failure detail") != std::string::npos,
+	      "a failed case is counted and its diagnostic reaches the console");
+	failing.register_test("empty failure detail", [] { throw std::string{}; });
+	check(failing.run_tests().failed == 2, "an empty exception message is still a failure");
+	webvis::tests empty;
+	check(!empty.run_tests().success(), "an empty test run cannot pass");
 	std::cout << "webvis portable: " << checks << " checks, " << failures << " failures\n";
 	return failures == 0 ? 0 : 1;
 }

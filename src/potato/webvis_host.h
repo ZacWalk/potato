@@ -7,7 +7,6 @@
 #include "libdesktop/ui.h"
 #include "webvis.h"
 
-
 // The installed face for a CSS font family: a generic family such as
 // "monospace" becomes a Windows font; any other name is returned as it is.
 std::string windows_face(std::string_view css_family);
@@ -49,9 +48,7 @@ class potato_image final : public webvis::image
 	core::surface_ptr _surface;
 
 public:
-	explicit potato_image(core::surface_ptr surface) : _surface(std::move(surface))
-	{
-	}
+	explicit potato_image(core::surface_ptr surface) : _surface(std::move(surface)) {}
 
 	webvis::size dimensions() const override
 	{
@@ -75,9 +72,7 @@ class potato_device_context final : public webvis::device_context
 	core::color to_color(const webvis::web_color& c) const;
 
 public:
-	explicit potato_device_context(render::draw_context& dc, core::pointi origin = {}) : _dc(dc), _origin(origin)
-	{
-	}
+	explicit potato_device_context(render::draw_context& dc, core::pointi origin = {}) : _dc(dc), _origin(origin) {}
 
 	void fill_rect(const webvis::position& pos, const webvis::web_color& color) override;
 	void draw_text(int x, int y, std::string_view text, webvis::font_handle font,

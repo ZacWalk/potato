@@ -93,10 +93,8 @@ namespace
 
 		if (width <= 0) width = view_width;
 		if (height <= 0) height = view_height;
-		if (width <= 0 && height > 0 && view_width > 0 && view_height > 0)
-			width = height * view_width / view_height;
-		if (height <= 0 && width > 0 && view_width > 0 && view_height > 0)
-			height = width * view_height / view_width;
+		if (width <= 0 && height > 0 && view_width > 0 && view_height > 0) width = height * view_width / view_height;
+		if (height <= 0 && width > 0 && view_width > 0 && view_height > 0) height = width * view_height / view_width;
 		if (width <= 0) width = 300;
 		if (height <= 0) height = 150;
 
@@ -109,9 +107,7 @@ namespace
 			auto* pixels = reinterpret_cast<uint32_t*>(surface->pixels_line(y));
 			std::fill(pixels, pixels + bitmap_width, core::rgba(238, 238, 238));
 			pixels[0] = pixels[bitmap_width - 1] = core::rgba(153, 153, 153);
-			const int diagonal = bitmap_height > 1
-				                     ? y * (bitmap_width - 1) / (bitmap_height - 1)
-				                     : 0;
+			const int diagonal = bitmap_height > 1 ? y * (bitmap_width - 1) / (bitmap_height - 1) : 0;
 			pixels[diagonal] = core::rgba(187, 187, 187);
 			pixels[bitmap_width - 1 - diagonal] = core::rgba(187, 187, 187);
 		}
@@ -140,11 +136,10 @@ namespace
 	core::file_path local_resource_path(const std::string& url)
 	{
 		std::string path = url;
-		if (path.size() >= 7 && webvis::nicmp(path.c_str(), "file://", 7) == 0)
-			path = platform::resolve_url({}, path);
+		if (path.size() >= 7 && webvis::nicmp(path.c_str(), "file://", 7) == 0) path = platform::resolve_url({}, path);
 
 		const bool drive_path = path.size() >= 3 && std::isalpha(static_cast<unsigned char>(path[0])) &&
-			path[1] == ':' && core::is_path_sep(path[2]);
+		                        path[1] == ':' && core::is_path_sep(path[2]);
 		const bool rooted_path = !path.empty() && core::is_path_sep(path[0]);
 		if (!drive_path && !rooted_path) return {};
 
@@ -178,7 +173,6 @@ namespace
 		return result;
 	}
 }
-
 
 // ── potato_device_context ────────────────────────────────────────────────────
 
@@ -239,16 +233,17 @@ void potato_device_context::pop_clip()
 	_dc.restore_clip();
 }
 
-
 // ── fonts ────────────────────────────────────────────────────────────────────
 
 std::string windows_face(const std::string_view css_family)
 {
 	static constexpr std::pair<std::string_view, std::string_view> generics[] = {
+		// clang-format off
 		{"monospace", "Consolas"}, {"ui-monospace", "Consolas"},
 		{"sans-serif", "Arial"}, {"ui-sans-serif", "Segoe UI"}, {"system-ui", "Segoe UI"},
 		{"serif", "Times New Roman"}, {"ui-serif", "Times New Roman"},
 		{"cursive", "Comic Sans MS"}, {"fantasy", "Impact"},
+		// clang-format on
 	};
 
 	auto name = css_family;
@@ -264,11 +259,9 @@ std::string windows_face(const std::string_view css_family)
 	return std::string(css_family);
 }
 
-
 // ── scratch_file ─────────────────────────────────────────────────────────────
 
-scratch_file::scratch_file(core::file_path path, platform::file_ptr file)
-	: _path(std::move(path)), _file(std::move(file))
+scratch_file::scratch_file(core::file_path path, platform::file_ptr file) : _path(path), _file(std::move(file))
 {
 }
 
@@ -289,7 +282,7 @@ std::shared_ptr<scratch_file> scratch_file::create(const std::string_view /*pref
 		return nullptr;
 	}
 
-	return std::make_shared<scratch_file>(std::move(path), std::move(file));
+	return std::make_shared<scratch_file>(path, std::move(file));
 }
 
 void scratch_file::write(const uint8_t* data, const size_t size)
@@ -313,7 +306,6 @@ void scratch_file::discard()
 	if (!_path.is_empty()) platform::delete_file(_path);
 }
 
-
 // ── the async HTTP client ────────────────────────────────────────────────────
 
 // Each request downloads to a temp file and then delivers one completion on the
@@ -326,9 +318,7 @@ class potato_host::http_client
 	{
 		using callback_t = std::function<void(const std::string& file, uint32_t error, uint32_t status)>;
 
-		explicit request(callback_t cb) : callback(std::move(cb))
-		{
-		}
+		explicit request(callback_t cb) : callback(std::move(cb)) {}
 
 		void cancel()
 		{
@@ -424,7 +414,7 @@ public:
 		}
 
 		platform::async_http_callbacks cb;
-		cb.on_headers = [ctx](const int status, std::string, uint64_t)
+		cb.on_headers = [ctx](const int status, const std::string&, uint64_t)
 		{
 			ctx->status_code = status;
 		};
@@ -461,8 +451,14 @@ public:
 			});
 		};
 
-		cb.on_complete = [finish]() { finish(0); };
-		cb.on_error = [finish](std::string) { finish(1); };
+		cb.on_complete = [finish]()
+		{
+			finish(0);
+		};
+		cb.on_error = [finish](const std::string&)
+		{
+			finish(1);
+		};
 
 		auto async = _session->get(url, std::move(cb));
 		if (!async)
@@ -481,7 +477,6 @@ public:
 		return true;
 	}
 };
-
 
 // ── potato_host ──────────────────────────────────────────────────────────────
 
@@ -557,7 +552,8 @@ int potato_host::text_width(const webvis::font_handle font, const std::string_vi
 	{
 		std::string measured(text);
 		measured.push_back('x');
-		const auto with_terminator = mc->measure_text(measured, face, render::text_style::single_line, 1000000, 1000).cx;
+		const auto with_terminator = mc->measure_text(measured, face, render::text_style::single_line, 1000000, 1000)
+		                                 .cx;
 		const auto terminator = mc->measure_text("x", face, render::text_style::single_line, 1000000, 1000).cx;
 		return std::max(0, with_terminator - terminator - 1);
 	}
@@ -573,24 +569,21 @@ void potato_host::load_resource(const webvis::resource_kind kind, const std::str
 	// the UI thread as the engine requires.
 	if (const auto path = local_resource_path(url); !path.is_empty())
 	{
-		webvis::dispatch_to_ui([kind, path, done = std::move(done)]
-		{
-			done(decode_resource(kind, path));
-		});
+		webvis::dispatch_to_ui([kind, path, done = std::move(done)] { done(decode_resource(kind, path)); });
 		return;
 	}
 
-	const auto started = _http->download(
-		url, [kind, done](const std::string& file_name, const uint32_t error, const uint32_t status)
+	const auto started = _http->download(url, [kind, done](const std::string& file_name, const uint32_t error,
+	                                                       const uint32_t status)
+	{
+		if (error || status >= 400)
 		{
-			if (error || status >= 400)
-			{
-				done(webvis::resource_result{});
-				return;
-			}
+			done(webvis::resource_result{});
+			return;
+		}
 
-			done(decode_resource(kind, core::file_path(file_name)));
-		});
+		done(decode_resource(kind, core::file_path(file_name)));
+	});
 
 	// A request that never launched still owes the caller a completion, or the
 	// document would wait on it forever.

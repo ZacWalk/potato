@@ -34,7 +34,7 @@ endif()
 include(FetchContent)
 FetchContent_Declare(libdesktop
     GIT_REPOSITORY https://github.com/ZacWalk/libdesktop.git
-    GIT_TAG        04109ee82a500db38d439fa281bbc3f43124adfe
+    GIT_TAG        d172a12c6e3df0831a641133b96d073559a99db5
 )
 FetchContent_MakeAvailable(libdesktop)
 endif()
@@ -72,7 +72,7 @@ add_library(webvis STATIC
 add_library(webvis::webvis ALIAS webvis)
 
 target_include_directories(webvis PUBLIC src/libwebvis)
-target_compile_options(webvis PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/W3;/sdl;/MP>)
+target_compile_options(webvis PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/W4;/sdl;/MP>)
 target_precompile_headers(webvis PRIVATE src/libwebvis/pch.h)
 
 set_target_properties(webvis PROPERTIES
@@ -102,7 +102,7 @@ target_link_libraries(potato PRIVATE webvis::webvis libdesktop::ui)
 
 target_compile_definitions(potato PRIVATE _WINSOCK_DEPRECATED_NO_WARNINGS)
 
-target_compile_options(potato PRIVATE /W3 /sdl /MP)
+target_compile_options(potato PRIVATE /W4 /sdl /MP)
 
 target_link_options(potato PRIVATE
     /DEBUG
@@ -125,16 +125,18 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(webvis_portable_tests tests/portable.cpp)
     target_link_libraries(webvis_portable_tests PRIVATE webvis::webvis)
+    target_compile_options(webvis_portable_tests PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/W4>)
     add_test(NAME webvis_portable COMMAND webvis_portable_tests)
-    set_tests_properties(webvis_portable PROPERTIES TIMEOUT 30 LABELS "potato;webvis")
+    set_tests_properties(webvis_portable PROPERTIES TIMEOUT 30 LABELS "potato;webvis;headless")
     if(POTATO_BUILD_APP)
     add_executable(potato_tests tests/smoke.cpp)
+    target_compile_options(potato_tests PRIVATE /W4)
     add_test(NAME potato_unit COMMAND potato_tests)
-    set_tests_properties(potato_unit PROPERTIES TIMEOUT 30 LABELS potato)
+    set_tests_properties(potato_unit PROPERTIES TIMEOUT 30 LABELS "potato;headless")
 
     add_test(NAME potato_selftest COMMAND potato --test-offline)
     set_tests_properties(potato_selftest PROPERTIES
-        TIMEOUT 120 LABELS potato WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+        TIMEOUT 120 LABELS "potato;headless" WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 
     # The full self-test also fetches live pages, so it is labelled for the
     # network rather than with the offline suite above.

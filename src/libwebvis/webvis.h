@@ -58,8 +58,7 @@ namespace webvis
 
 		position() = default;
 
-		position(const int x, const int y, const int width, const int height)
-			: x(x), y(y), width(width), height(height)
+		position(const int x, const int y, const int width, const int height) : x(x), y(y), width(width), height(height)
 		{
 		}
 
@@ -84,10 +83,7 @@ namespace webvis
 			height -= mg.top + mg.bottom;
 		}
 
-		void clear()
-		{
-			x = y = width = height = 0;
-		}
+		void clear() { x = y = width = height = 0; }
 
 		void operator=(const size& sz)
 		{
@@ -95,31 +91,24 @@ namespace webvis
 			height = sz.height;
 		}
 
-		void move_to(const int x, const int y)
+		void move_to(const int new_x, const int new_y)
 		{
-			this->x = x;
-			this->y = y;
+			this->x = new_x;
+			this->y = new_y;
 		}
 
 		bool does_intersect(const position* val) const
 		{
 			if (!val) return false;
 
-			return
-				left() <= val->right() &&
-				right() >= val->left() &&
-				bottom() >= val->top() &&
-				top() <= val->bottom();
+			return left() <= val->right() && right() >= val->left() && bottom() >= val->top() && top() <= val->bottom();
 		}
 
-		bool empty() const
-		{
-			return width == 0 && height == 0;
-		}
+		bool empty() const { return width == 0 && height == 0; }
 
-		bool is_point_inside(const int x, const int y) const
+		bool is_point_inside(const int px, const int py) const
 		{
-			return x >= left() && x <= right() && y >= top() && y <= bottom();
+			return px >= left() && px <= right() && py >= top() && py <= bottom();
 		}
 	};
 
@@ -210,8 +199,7 @@ namespace webvis
 		virtual void fill_rect(const position& pos, const web_color& color) = 0;
 
 		// Draws with a transparent background; fill the background separately.
-		virtual void draw_text(int x, int y, std::string_view text, font_handle font,
-		                       const web_color& color) = 0;
+		virtual void draw_text(int x, int y, std::string_view text, font_handle font, const web_color& color) = 0;
 
 		// Scales the image into `pos`.
 		virtual void draw_image(const image_ptr& img, const position& pos) = 0;
@@ -234,7 +222,7 @@ namespace webvis
 	{
 		bool ok = false;
 		std::string text; // populated for resource_kind::stylesheet
-		image_ptr image; // populated for resource_kind::image
+		image_ptr image;  // populated for resource_kind::image
 	};
 
 	// Text measurement, resource loading and environment queries.
@@ -273,8 +261,7 @@ namespace webvis
 		// The labels "utf-16le", "utf-16be" and "windows-1252" must be
 		// supported, since the engine names them explicitly when it detects a
 		// byte-order mark or needs the de-facto legacy default.
-		virtual bool transcode_to_utf8(std::string_view bytes, std::string_view charset,
-		                               std::string& out) = 0;
+		virtual bool transcode_to_utf8(std::string_view bytes, std::string_view charset, std::string& out) = 0;
 	};
 
 	// The engine reaches its host through this global, mirroring the way the
@@ -302,16 +289,10 @@ namespace webvis
 		virtual void invalidate() = 0;
 		virtual void open(const std::string& url) = 0;
 
-		virtual void diagnostic(const std::string&)
-		{
-		}
+		virtual void diagnostic(const std::string&) {}
 
-		virtual void resource_started(const std::string&, const std::string&)
-		{
-		}
+		virtual void resource_started(const std::string&, const std::string&) {}
 
-		virtual void resource_finished(const std::string&, const std::string&, bool)
-		{
-		}
+		virtual void resource_finished(const std::string&, const std::string&, bool) {}
 	};
 }

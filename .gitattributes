@@ -3,3 +3,6 @@
 /.dd/** -text linguist-vendored
 # Saved third-party pages the offline tests load, not this project's code
 /test-files/** linguist-vendored
+/tools/generate_icon.py text eol=lf
+/tools/iconlib.py -text linguist-vendored
+/src/potato/res/potato.ico -text

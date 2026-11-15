@@ -49,7 +49,7 @@
     }
   ],
   "testPresets": [
-    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
-    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } }
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true, "verbosity": "verbose" } },
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true, "verbosity": "verbose" } }
   ]
 }
